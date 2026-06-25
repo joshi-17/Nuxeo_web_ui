@@ -449,7 +449,7 @@
         // ES index — _all covers all Nuxeo indices
         index: {
           type: String,
-          value: '_all'
+          value: 'nuxeo'
         },
 
         // Bound to nuxeo-repository-data output
@@ -542,7 +542,7 @@
         var d = new Date(date);
         d.setDate(d.getDate() + 1);
         d.setMilliseconds(d.getMilliseconds() - 1);
-        return d.toISOString();
+        return d.toISOString().split('T')[0];
       }
 
     });
