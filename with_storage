@@ -1,0 +1,624 @@
+<!--
+`fid-analytical-dashboard`
+@group Nuxeo UI
+@element fid-analytical-dashboard
+-->
+<dom-module id="fid-analytical-dashboard">
+  <template>
+    <style include="iron-flex iron-flex-alignment nuxeo-styles">
+
+      /* Base */
+      .page, .content {
+        @apply --layout-vertical;
+      }
+
+      .dashboard-container {
+        padding: 16px 24px 32px 24px;
+        background: var(--nuxeo-page-background, #f0f2f5);
+        min-height: 100vh;
+        box-sizing: border-box;
+      }
+
+      /* Header card: title left, divider, controls right */
+      .header-slot {
+        display: flex;
+        flex-direction: row;
+        align-items: center;
+        justify-content: space-between;
+        flex-wrap: nowrap;
+        gap: 24px;
+        padding: 8px 4px;
+      }
+
+      .header-left {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        flex: 1;
+        min-width: 0;
+      }
+
+      .header-left h1 {
+        font-size: 20px;
+        font-weight: 500;
+        color: var(--nuxeo-text-default, #212121);
+        margin: 0;
+        letter-spacing: -0.2px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .header-left p {
+        font-size: 12px;
+        color: var(--nuxeo-text-light, #9e9e9e);
+        margin: 0;
+        font-weight: 400;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .header-divider {
+        width: 1px;
+        height: 40px;
+        background: var(--nuxeo-border, #e0e0e0);
+        flex-shrink: 0;
+      }
+
+      .header-controls {
+        display: flex;
+        flex-direction: row;
+        align-items: flex-end;
+        gap: 16px;
+        flex-shrink: 0;
+        flex-wrap: wrap;
+      }
+
+      .header-controls nuxeo-select {
+        min-width: 150px;
+      }
+
+      /* Custom date pickers */
+      .custom-dates {
+        display: flex;
+        flex-direction: row;
+        align-items: flex-end;
+        gap: 12px;
+      }
+
+      .date-field {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .date-field label {
+        font-size: 11px;
+        color: var(--nuxeo-text-light, #9e9e9e);
+        font-weight: 500;
+        text-transform: uppercase;
+        letter-spacing: 0.6px;
+      }
+
+      .date-field input[type="date"] {
+        padding: 0 10px;
+        border: 1px solid var(--nuxeo-border, #e0e0e0);
+        border-radius: 2px;
+        font-size: 13px;
+        color: var(--nuxeo-text-default, #333);
+        background: white;
+        height: 32px;
+        box-sizing: border-box;
+        font-family: var(--nuxeo-app-font, 'Roboto', sans-serif);
+        transition: border-color 0.15s ease;
+      }
+
+      .date-field input[type="date"]:focus {
+        outline: none;
+        border-color: var(--nuxeo-primary-color, #1a73e8);
+        box-shadow: 0 0 0 2px rgba(26, 115, 232, 0.12);
+      }
+
+      /* Card grid: 3 per row */
+      .flex-layout {
+        display: flex;
+        flex-wrap: wrap;
+        margin: 16px -8px 0 -8px;
+      }
+
+      .flex-layout nuxeo-card {
+        flex: 1 0 calc(33% - 16px);
+        margin: 0 8px 16px 8px;
+        box-sizing: border-box;
+      }
+
+      /* Hero card spans the full row */
+      .flex-layout nuxeo-card.full-width {
+        flex: 1 0 calc(100% - 16px);
+      }
+
+      /* Hero split: line chart | storage bar chart */
+      .hero-split {
+        display: flex;
+        flex-direction: row;
+        gap: 16px;
+        width: 100%;
+      }
+
+      .hero-half {
+        flex: 1 1 50%;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .hero-divider-v {
+        width: 1px;
+        background: var(--nuxeo-border, #e0e0e0);
+        flex-shrink: 0;
+      }
+
+      .chart-sub-title {
+        font-size: 13px;
+        font-weight: 500;
+        color: var(--nuxeo-text-default, #555);
+        margin: 0 0 4px 4px;
+      }
+
+      /* Chart sizing — height-driven so charts never overlap */
+      .chart-box {
+        position: relative;
+        width: 100%;
+        height: 320px;
+        margin-top: 8px;
+      }
+
+      chart-line,
+      chart-bar,
+      chart-pie {
+        display: block;
+        width: 100% !important;
+        height: 100% !important;
+        font-size: 0.78rem;
+      }
+
+      /* Placeholder slots (2-6) */
+      .slot-placeholder {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        min-height: 200px;
+        gap: 10px;
+      }
+
+      .slot-placeholder iron-icon {
+        --iron-icon-width: 40px;
+        --iron-icon-height: 40px;
+        color: var(--nuxeo-border, #ddd);
+      }
+
+      .slot-placeholder .placeholder-label {
+        font-size: 12px;
+        color: var(--nuxeo-text-light, #bbb);
+        letter-spacing: 0.3px;
+      }
+
+      /* Responsive */
+      @media (max-width: 1100px) {
+        .flex-layout nuxeo-card {
+          flex: 1 0 calc(50% - 16px);
+        }
+      }
+
+      @media (max-width: 768px) {
+        .dashboard-container {
+          padding: 12px 16px 24px 16px;
+        }
+        .flex-layout nuxeo-card {
+          flex: 1 0 calc(100% - 16px);
+        }
+        .hero-split {
+          flex-direction: column;
+        }
+        .hero-divider-v {
+          display: none;
+        }
+        .header-slot {
+          flex-direction: column;
+          align-items: flex-start;
+          gap: 16px;
+        }
+        .header-divider {
+          display: none;
+        }
+        .header-controls {
+          width: 100%;
+          flex-direction: column;
+          align-items: flex-start;
+        }
+        .header-controls nuxeo-select {
+          width: 100%;
+        }
+        .custom-dates {
+          flex-direction: column;
+          width: 100%;
+        }
+        .date-field input[type="date"] {
+          width: 100%;
+        }
+        .chart-box {
+          height: 260px;
+        }
+      }
+
+    </style>
+
+    <!-- Documents created per month, grouped by file type (dynamic legends) -->
+    <nuxeo-repository-data
+      start-date="[[startDate]]"
+      end-date="[[_extendEndDate(endDate)]]"
+      with-date-intervals="month"
+      date-field="dc:created"
+      grouped-by="file:content.mime-type"
+      group-limit="8"
+      data="{{typeGrowth}}"
+      index="[[index]]">
+    </nuxeo-repository-data>
+
+    <!-- Storage growth per month: sum of file sizes (bytes -> GB) -->
+    <nuxeo-repository-data
+      start-date="[[startDate]]"
+      end-date="[[_extendEndDate(endDate)]]"
+      with-date-intervals="month"
+      date-field="dc:created"
+      metrics="sum(file:content.length)"
+      data="{{storagePerMonth}}"
+      index="[[index]]">
+    </nuxeo-repository-data>
+
+    <div class="page">
+      <div class="content">
+        <nuxeo-page>
+
+          <!-- Nuxeo admin top bar -->
+          <div slot="header">
+            <span class="flex">Analytical Dashboard</span>
+          </div>
+
+          <div class="dashboard-container">
+
+            <!-- Header card: title + period selector -->
+            <nuxeo-card class="dates">
+              <div class="header-slot">
+
+                <div class="header-left">
+                  <h1>Analytical Dashboard</h1>
+                  <p>Monthly usage tracking, growth metrics and adoption overview</p>
+                </div>
+
+                <div class="header-divider"></div>
+
+                <div class="header-controls">
+
+                  <nuxeo-select
+                    label="Period"
+                    selected="{{selectedPeriod}}"
+                    options='["1month","2months","3months","4months","6months","8months","10months","1year","custom"]'
+                    on-selected-changed="_onPeriodChanged">
+                  </nuxeo-select>
+
+                  <template is="dom-if" if="[[_isCustom(selectedPeriod)]]">
+                    <div class="custom-dates">
+                      <div class="date-field">
+                        <label>Start Date</label>
+                        <input type="date" value="{{customStart::change}}" on-change="_onCustomDateChanged" />
+                      </div>
+                      <div class="date-field">
+                        <label>End Date</label>
+                        <input type="date" value="{{customEnd::change}}" on-change="_onCustomDateChanged" />
+                      </div>
+                    </div>
+                  </template>
+
+                </div>
+              </div>
+            </nuxeo-card>
+
+            <!-- Card grid -->
+            <div class="flex-layout">
+
+              <!-- Hero card: line chart + storage bar chart side by side -->
+              <nuxeo-card class="full-width" heading="Document & Storage Growth">
+                <div class="hero-split">
+
+                  <!-- Left: document growth by file type -->
+                  <div class="hero-half">
+                    <div class="chart-sub-title">Document Growth by File Type</div>
+                    <div class="chart-box">
+                      <chart-line
+                        labels="[[_growthLabels(typeGrowth)]]"
+                        values="[[_growthValues(typeGrowth)]]"
+                        series="[[_growthSeries(typeGrowth)]]"
+                        options='{"responsive":true,"maintainAspectRatio":false,"legend":{"display":true,"position":"top","labels":{"boxWidth":10,"fontSize":11,"padding":12}},"animation":false,"elements":{"line":{"tension":0.3,"borderWidth":2,"fill":false},"point":{"radius":3,"hoverRadius":5}},"scales":{"xAxes":[{"gridLines":{"color":"rgba(0,0,0,0.04)","drawBorder":false},"ticks":{"autoSkip":false,"maxRotation":30,"fontSize":11,"fontColor":"#9e9e9e"}}],"yAxes":[{"gridLines":{"color":"rgba(0,0,0,0.04)","drawBorder":false},"ticks":{"beginAtZero":true,"stepSize":1,"fontSize":11,"fontColor":"#9e9e9e"}}]},"tooltips":{"mode":"index","intersect":false}}'>
+                      </chart-line>
+                    </div>
+                  </div>
+
+                  <div class="hero-divider-v"></div>
+
+                  <!-- Right: storage growth in GB -->
+                  <div class="hero-half">
+                    <div class="chart-sub-title">Storage Growth (GB)</div>
+                    <div class="chart-box">
+                      <chart-bar
+                        labels="[[_storageLabels(storagePerMonth)]]"
+                        values="[[_storageValues(storagePerMonth)]]"
+                        series='["Storage (GB)"]'
+                        options='{"responsive":true,"maintainAspectRatio":false,"legend":{"display":true,"position":"top","labels":{"boxWidth":10,"fontSize":11,"padding":12}},"animation":false,"scales":{"xAxes":[{"gridLines":{"display":false,"drawBorder":false},"ticks":{"autoSkip":false,"maxRotation":30,"fontSize":11,"fontColor":"#9e9e9e"}}],"yAxes":[{"gridLines":{"color":"rgba(0,0,0,0.04)","drawBorder":false},"ticks":{"beginAtZero":true,"fontSize":11,"fontColor":"#9e9e9e"}}]},"tooltips":{"mode":"index","intersect":false}}'>
+                      </chart-bar>
+                    </div>
+                  </div>
+
+                </div>
+              </nuxeo-card>
+
+              <!-- Slots 2-6: placeholders for next phase -->
+              <nuxeo-card heading="Slot 2">
+                <div class="slot-placeholder">
+                  <iron-icon icon="icons:insert-chart"></iron-icon>
+                  <span class="placeholder-label">Coming soon</span>
+                </div>
+              </nuxeo-card>
+
+              <nuxeo-card heading="Slot 3">
+                <div class="slot-placeholder">
+                  <iron-icon icon="icons:insert-chart"></iron-icon>
+                  <span class="placeholder-label">Coming soon</span>
+                </div>
+              </nuxeo-card>
+
+              <nuxeo-card heading="Slot 4">
+                <div class="slot-placeholder">
+                  <iron-icon icon="icons:insert-chart"></iron-icon>
+                  <span class="placeholder-label">Coming soon</span>
+                </div>
+              </nuxeo-card>
+
+              <nuxeo-card heading="Slot 5">
+                <div class="slot-placeholder">
+                  <iron-icon icon="icons:insert-chart"></iron-icon>
+                  <span class="placeholder-label">Coming soon</span>
+                </div>
+              </nuxeo-card>
+
+              <nuxeo-card heading="Slot 6">
+                <div class="slot-placeholder">
+                  <iron-icon icon="icons:insert-chart"></iron-icon>
+                  <span class="placeholder-label">Coming soon</span>
+                </div>
+              </nuxeo-card>
+
+            </div>
+
+          </div>
+
+        </nuxeo-page>
+      </div>
+    </div>
+
+  </template>
+
+  <script>
+    Polymer({
+      is: 'fid-analytical-dashboard',
+      behaviors: [Nuxeo.LayoutBehavior],
+
+      properties: {
+
+        selectedPeriod: {
+          type: String,
+          value: '6months',
+          observer: '_onPeriodChanged'
+        },
+
+        startDate: {
+          type: String,
+          notify: true
+        },
+
+        endDate: {
+          type: String,
+          notify: true
+        },
+
+        customStart: {
+          type: String
+        },
+
+        customEnd: {
+          type: String
+        },
+
+        // ES index
+        index: {
+          type: String,
+          value: 'nuxeo'
+        },
+
+        // Documents per month grouped by file type
+        typeGrowth: {
+          type: Array,
+          value: function() { return []; }
+        },
+
+        // Storage (sum of file sizes) per month
+        storagePerMonth: {
+          type: Array,
+          value: function() { return []; }
+        }
+
+      },
+
+      ready: function() {
+        this._computeDates(this.selectedPeriod);
+      },
+
+      // Period selection
+      _isCustom: function(period) {
+        return period === 'custom';
+      },
+
+      _onPeriodChanged: function(newVal) {
+        if (!newVal || newVal === 'custom') return;
+        this._computeDates(newVal);
+      },
+
+      _computeDates: function(period) {
+        var monthMap = {
+          '1month':   1,
+          '2months':  2,
+          '3months':  3,
+          '4months':  4,
+          '6months':  6,
+          '8months':  8,
+          '10months': 10,
+          '1year':    12
+        };
+        var months = monthMap[period];
+        if (!months) return;
+
+        var end   = new Date();
+        var start = new Date();
+        start.setMonth(start.getMonth() - months);
+
+        this.startDate = this._toISODate(start);
+        this.endDate   = this._toISODate(end);
+      },
+
+      // Custom range: fires when both dates are filled
+      _onCustomDateChanged: function() {
+        if (this.customStart && this.customEnd) {
+          this.startDate = this.customStart;
+          this.endDate   = this.customEnd;
+        }
+      },
+
+      _toISODate: function(date) {
+        return date.toISOString().split('T')[0];
+      },
+
+      // Make endDate inclusive of the full day
+      _extendEndDate: function(date) {
+        if (!date) return date;
+        var d = new Date(date);
+        d.setDate(d.getDate() + 1);
+        d.setMilliseconds(d.getMilliseconds() - 1);
+        return d.toISOString().split('T')[0];
+      },
+
+      // Returns the list of file-type buckets inside one month entry, if any
+      _subBuckets: function(monthEntry) {
+        return monthEntry.groups || monthEntry.buckets || monthEntry.children || null;
+      },
+
+      // X-axis labels = month keys
+      _growthLabels: function(data) {
+        if (!data || !data.length) return [];
+        return data.map(function(entry) {
+          return entry.key;
+        });
+      },
+
+      // Legend names = distinct file types found in the data
+      // Falls back to a single "Documents" series if no type buckets exist
+      _growthSeries: function(data) {
+        if (!data || !data.length) return ['Documents'];
+        var types = {};
+        var self = this;
+        data.forEach(function(month) {
+          var subs = self._subBuckets(month);
+          if (subs) {
+            subs.forEach(function(s) { types[s.key] = true; });
+          }
+        });
+        var keys = Object.keys(types);
+        if (!keys.length) return ['Documents'];
+        return keys.map(function(k) { return self._friendlyType(k); });
+      },
+
+      // One value series per file type; falls back to monthly totals
+      _growthValues: function(data) {
+        if (!data || !data.length) return [[]];
+        var self = this;
+        var typeKeys = {};
+        var hasSubs = false;
+
+        data.forEach(function(month) {
+          var subs = self._subBuckets(month);
+          if (subs && subs.length) {
+            hasSubs = true;
+            subs.forEach(function(s) { typeKeys[s.key] = true; });
+          }
+        });
+
+        if (!hasSubs) {
+          return [data.map(function(month) { return month.value; })];
+        }
+
+        var keys = Object.keys(typeKeys);
+        return keys.map(function(type) {
+          return data.map(function(month) {
+            var subs = self._subBuckets(month) || [];
+            var match = subs.filter(function(s) { return s.key === type; })[0];
+            return match ? match.value : 0;
+          });
+        });
+      },
+
+      // Storage chart helpers
+      _storageLabels: function(data) {
+        if (!data || !data.length) return [];
+        return data.map(function(entry) {
+          return entry.key;
+        });
+      },
+
+      _storageValues: function(data) {
+        if (!data || !data.length) return [[]];
+        var self = this;
+        return [data.map(function(entry) {
+          return self._bytesToGB(entry.value);
+        })];
+      },
+
+      _bytesToGB: function(bytes) {
+        if (!bytes) return 0;
+        return Math.round((bytes / 1073741824) * 100) / 100;
+      },
+
+      // Short readable label from a mime-type
+      _friendlyType: function(mime) {
+        if (!mime) return 'Unknown';
+        var map = {
+          'application/pdf': 'PDF',
+          'image/png': 'PNG Image',
+          'image/jpeg': 'JPEG Image',
+          'image/gif': 'GIF Image',
+          'text/plain': 'Text',
+          'video/mp4': 'MP4 Video',
+          'application/msword': 'Word',
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'Word',
+          'application/vnd.ms-excel': 'Excel',
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'Excel'
+        };
+        if (map[mime]) return map[mime];
+        var parts = mime.split('/');
+        return parts.length > 1 ? parts[1].toUpperCase() : mime;
+      }
+
+    });
+  </script>
+
+</dom-module>
