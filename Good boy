@@ -1,0 +1,551 @@
+<!--
+`fid-analytical-dashboard`
+@group Nuxeo UI
+@element fid-analytical-dashboard
+-->
+<dom-module id="fid-analytical-dashboard">
+  <template>
+    <style include="nuxeo-styles">
+
+      /* ══════════════════════════════════
+         BASE
+         ══════════════════════════════════ */
+      .page, .content {
+        @apply --layout-vertical;
+      }
+
+      .dashboard-container {
+        padding: 16px 24px 32px 24px;
+        background: var(--nuxeo-page-background, #f0f2f5);
+        min-height: 100vh;
+        box-sizing: border-box;
+      }
+
+      /* ══════════════════════════════════
+         HEADER SLOT CARD
+         like the After/Before bar in analytics
+         spans full width, sticky feel
+         ══════════════════════════════════ */
+      .header-slot {
+        display: flex;
+        flex-direction: row;
+        align-items: center;
+        justify-content: space-between;
+        flex-wrap: nowrap;
+        gap: 24px;
+        padding: 8px 4px;
+      }
+
+      .header-left {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        flex: 1;
+        min-width: 0;
+      }
+
+      .header-left h1 {
+        font-size: 20px;
+        font-weight: 500;
+        color: var(--nuxeo-text-default, #212121);
+        margin: 0;
+        letter-spacing: -0.2px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .header-left p {
+        font-size: 12px;
+        color: var(--nuxeo-text-light, #9e9e9e);
+        margin: 0;
+        font-weight: 400;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      /* Vertical divider between title and controls */
+      .header-divider {
+        width: 1px;
+        height: 40px;
+        background: var(--nuxeo-border, #e0e0e0);
+        flex-shrink: 0;
+      }
+
+      .header-controls {
+        display: flex;
+        flex-direction: row;
+        align-items: flex-end;
+        gap: 16px;
+        flex-shrink: 0;
+        flex-wrap: wrap;
+      }
+
+      .header-controls nuxeo-select {
+        min-width: 150px;
+      }
+
+      /* Custom date pickers */
+      .custom-dates {
+        display: flex;
+        flex-direction: row;
+        align-items: flex-end;
+        gap: 12px;
+      }
+
+      .date-field {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .date-field label {
+        font-size: 11px;
+        color: var(--nuxeo-text-light, #9e9e9e);
+        font-weight: 500;
+        text-transform: uppercase;
+        letter-spacing: 0.6px;
+      }
+
+      .date-field input[type="date"] {
+        padding: 0 10px;
+        border: 1px solid var(--nuxeo-border, #e0e0e0);
+        border-radius: 2px;
+        font-size: 13px;
+        color: var(--nuxeo-text-default, #333);
+        background: white;
+        height: 32px;
+        box-sizing: border-box;
+        font-family: var(--nuxeo-app-font, 'Roboto', sans-serif);
+        transition: border-color 0.15s ease;
+      }
+
+      .date-field input[type="date"]:focus {
+        outline: none;
+        border-color: var(--nuxeo-primary-color, #1a73e8);
+        box-shadow: 0 0 0 2px rgba(26, 115, 232, 0.12);
+      }
+
+      /* ══════════════════════════════════
+         SLOT GRID — 3 per row, 2 rows = 6
+         ══════════════════════════════════ */
+      .slot-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        grid-template-rows: auto auto;
+        gap: 16px;
+        margin-top: 16px;
+      }
+
+      /* Slot 1 — hero chart, spans all 3 columns */
+      .slot-hero {
+        grid-column: 1 / -1;
+      }
+
+      /* All cards in grid: consistent height */
+      .slot-grid nuxeo-card {
+        margin: 0 !important;
+      }
+
+      /* ══════════════════════════════════
+         CHART CONTAINERS
+         ══════════════════════════════════ */
+      /* Hero chart — tall */
+      .chart-container-hero {
+        position: relative;
+        width: 100%;
+        height: 360px;
+        margin-top: 12px;
+      }
+
+      /* Small slot charts */
+      .chart-container-small {
+        position: relative;
+        width: 100%;
+        height: 200px;
+        margin-top: 12px;
+      }
+
+      chart-line,
+      chart-pie,
+      chart-bar {
+        display: block;
+        width: 100% !important;
+        height: 100% !important;
+        font-size: 0.78rem;
+      }
+
+      /* ══════════════════════════════════
+         PLACEHOLDER SLOTS (2-6)
+         ══════════════════════════════════ */
+      .slot-placeholder {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        min-height: 200px;
+        gap: 10px;
+      }
+
+      .slot-placeholder iron-icon {
+        --iron-icon-width: 40px;
+        --iron-icon-height: 40px;
+        color: var(--nuxeo-border, #ddd);
+      }
+
+      .slot-placeholder .placeholder-label {
+        font-size: 12px;
+        color: var(--nuxeo-text-light, #bbb);
+        letter-spacing: 0.3px;
+      }
+
+      /* ══════════════════════════════════
+         RESPONSIVE BREAKPOINTS
+         ══════════════════════════════════ */
+      @media (max-width: 1100px) {
+        .slot-grid {
+          grid-template-columns: repeat(2, 1fr);
+        }
+        .slot-hero {
+          grid-column: 1 / -1;
+        }
+      }
+
+      @media (max-width: 768px) {
+        .dashboard-container {
+          padding: 12px 16px 24px 16px;
+        }
+        .slot-grid {
+          grid-template-columns: 1fr;
+          gap: 12px;
+        }
+        .slot-hero {
+          grid-column: 1;
+        }
+        .header-slot {
+          flex-direction: column;
+          align-items: flex-start;
+          gap: 16px;
+        }
+        .header-divider {
+          display: none;
+        }
+        .header-controls {
+          width: 100%;
+          flex-direction: column;
+          align-items: flex-start;
+        }
+        .header-controls nuxeo-select {
+          width: 100%;
+        }
+        .custom-dates {
+          flex-direction: column;
+          width: 100%;
+        }
+        .date-field input[type="date"] {
+          width: 100%;
+        }
+        .chart-container-hero {
+          height: 260px;
+        }
+      }
+
+    </style>
+
+    <!-- ══════════════════════════════════════════════
+         ES DATA — documents created per month
+         Reacts automatically when startDate/endDate
+         change via Polymer two-way binding {{}}
+         ══════════════════════════════════════════════ -->
+    <nuxeo-repository-data
+      start-date="[[startDate]]"
+      end-date="[[_extendEndDate(endDate)]]"
+      with-date-intervals="month"
+      date-field="dc:created"
+      data="{{docsCreatedPerMonth}}"
+      index="[[index]]">
+    </nuxeo-repository-data>
+
+    <!-- ══════════════════════════════════
+         PAGE SHELL
+         ══════════════════════════════════ -->
+    <div class="page">
+      <div class="content">
+        <nuxeo-page>
+
+          <!-- Nuxeo admin top bar — untouched -->
+          <div slot="header">
+            <span class="flex">Analytical Dashboard</span>
+          </div>
+
+          <!-- ════════════════════════════
+               DASHBOARD BODY
+               ════════════════════════════ -->
+          <div class="dashboard-container">
+
+            <!-- ── HEADER SLOT CARD
+                 Full width, title left
+                 divider, dropdown right
+                 Exactly like After/Before bar ── -->
+            <nuxeo-card class="dates">
+              <div class="header-slot">
+
+                <!-- Left: title + description -->
+                <div class="header-left">
+                  <h1>Analytical Dashboard</h1>
+                  <p>Monthly usage tracking, growth metrics and adoption overview</p>
+                </div>
+
+                <!-- Visual divider -->
+                <div class="header-divider"></div>
+
+                <!-- Right: period selector + custom dates -->
+                <div class="header-controls">
+
+                  <nuxeo-select
+                    label="Period"
+                    selected="{{selectedPeriod}}"
+                    options='["1month","2months","3months","4months","6months","8months","10months","1year","custom"]'
+                    on-selected-changed="_onPeriodChanged">
+                  </nuxeo-select>
+
+                  <template is="dom-if" if="[[_isCustom(selectedPeriod)]]">
+                    <div class="custom-dates">
+                      <div class="date-field">
+                        <label>Start Date</label>
+                        <input
+                          type="date"
+                          value="{{customStart::change}}"
+                          on-change="_onCustomDateChanged" />
+                      </div>
+                      <div class="date-field">
+                        <label>End Date</label>
+                        <input
+                          type="date"
+                          value="{{customEnd::change}}"
+                          on-change="_onCustomDateChanged" />
+                      </div>
+                    </div>
+                  </template>
+
+                </div>
+              </div>
+            </nuxeo-card>
+
+            <!-- ── 6-SLOT GRID: 3 per row ── -->
+            <div class="slot-grid">
+
+              <!-- ╔══════════════════════════╗
+                   SLOT 1 — Hero chart
+                   Full width, document growth
+                   ╚══════════════════════════╝ -->
+              <div class="slot-hero">
+                <nuxeo-card heading="Document Growth">
+                  <div class="chart-container-hero">
+                    <chart-line
+                      labels="[[_labels(docsCreatedPerMonth)]]"
+                      values="[[_values(docsCreatedPerMonth)]]"
+                      series='["Documents Created"]'
+                      options='{"responsive":true,"maintainAspectRatio":false,"legend":{"display":true,"position":"top","labels":{"boxWidth":10,"fontSize":11,"fontColor":"#757575","padding":16}},"animation":false,"elements":{"line":{"tension":0.35,"borderWidth":2.5,"borderColor":"#1a73e8","backgroundColor":"rgba(26,115,232,0.06)","fill":true},"point":{"radius":4,"hoverRadius":7,"hitRadius":10,"backgroundColor":"#1a73e8","borderColor":"#ffffff","borderWidth":2}},"scales":{"xAxes":[{"gridLines":{"display":true,"color":"rgba(0,0,0,0.03)","zeroLineColor":"rgba(0,0,0,0.08)","drawBorder":false},"ticks":{"autoSkip":false,"maxRotation":30,"minRotation":0,"fontSize":11,"fontColor":"#9e9e9e","padding":6}}],"yAxes":[{"gridLines":{"display":true,"color":"rgba(0,0,0,0.03)","zeroLineColor":"rgba(0,0,0,0.08)","drawBorder":false},"ticks":{"beginAtZero":true,"stepSize":1,"fontSize":11,"fontColor":"#9e9e9e","padding":8}}]},"tooltips":{"mode":"index","intersect":false,"backgroundColor":"rgba(33,33,33,0.85)","titleFontSize":12,"bodyFontSize":12,"cornerRadius":4,"caretSize":5}}'>
+                    </chart-line>
+                  </div>
+                </nuxeo-card>
+              </div>
+
+              <!-- ╔══════════════╗
+                   SLOT 2
+                   ╚══════════════╝ -->
+              <nuxeo-card heading="Slot 2">
+                <div class="slot-placeholder">
+                  <iron-icon icon="icons:insert-chart"></iron-icon>
+                  <span class="placeholder-label">Coming soon</span>
+                </div>
+              </nuxeo-card>
+
+              <!-- ╔══════════════╗
+                   SLOT 3
+                   ╚══════════════╝ -->
+              <nuxeo-card heading="Slot 3">
+                <div class="slot-placeholder">
+                  <iron-icon icon="icons:insert-chart"></iron-icon>
+                  <span class="placeholder-label">Coming soon</span>
+                </div>
+              </nuxeo-card>
+
+              <!-- ╔══════════════╗
+                   SLOT 4
+                   ╚══════════════╝ -->
+              <nuxeo-card heading="Slot 4">
+                <div class="slot-placeholder">
+                  <iron-icon icon="icons:insert-chart"></iron-icon>
+                  <span class="placeholder-label">Coming soon</span>
+                </div>
+              </nuxeo-card>
+
+              <!-- ╔══════════════╗
+                   SLOT 5
+                   ╚══════════════╝ -->
+              <nuxeo-card heading="Slot 5">
+                <div class="slot-placeholder">
+                  <iron-icon icon="icons:insert-chart"></iron-icon>
+                  <span class="placeholder-label">Coming soon</span>
+                </div>
+              </nuxeo-card>
+
+              <!-- ╔══════════════╗
+                   SLOT 6
+                   ╚══════════════╝ -->
+              <nuxeo-card heading="Slot 6">
+                <div class="slot-placeholder">
+                  <iron-icon icon="icons:insert-chart"></iron-icon>
+                  <span class="placeholder-label">Coming soon</span>
+                </div>
+              </nuxeo-card>
+
+            </div>
+            <!-- end .slot-grid -->
+
+          </div>
+          <!-- end .dashboard-container -->
+
+        </nuxeo-page>
+      </div>
+    </div>
+
+  </template>
+
+  <script>
+    Polymer({
+      is: 'fid-analytical-dashboard',
+      behaviors: [Nuxeo.LayoutBehavior],
+
+      properties: {
+
+        selectedPeriod: {
+          type: String,
+          value: '6months',
+          observer: '_onPeriodChanged'
+        },
+
+        startDate: {
+          type: String,
+          notify: true
+        },
+
+        endDate: {
+          type: String,
+          notify: true
+        },
+
+        customStart: {
+          type: String
+        },
+
+        customEnd: {
+          type: String
+        },
+
+        // ES index — _all covers all Nuxeo indices
+        index: {
+          type: String,
+          value: '_all'
+        },
+
+        // Bound to nuxeo-repository-data output
+        docsCreatedPerMonth: {
+          type: Array,
+          value: function() { return []; }
+        }
+
+      },
+
+      ready: function() {
+        this._computeDates(this.selectedPeriod);
+      },
+
+      // ─────────────────────────────────
+      // Period selection logic
+      // ─────────────────────────────────
+
+      _isCustom: function(period) {
+        return period === 'custom';
+      },
+
+      _onPeriodChanged: function(newVal) {
+        if (!newVal || newVal === 'custom') return;
+        this._computeDates(newVal);
+      },
+
+      _computeDates: function(period) {
+        var monthMap = {
+          '1month':   1,
+          '2months':  2,
+          '3months':  3,
+          '4months':  4,
+          '6months':  6,
+          '8months':  8,
+          '10months': 10,
+          '1year':    12
+        };
+        var months = monthMap[period];
+        if (!months) return;
+
+        var end   = new Date();
+        var start = new Date();
+        start.setMonth(start.getMonth() - months);
+
+        this.startDate = this._toISODate(start);
+        this.endDate   = this._toISODate(end);
+      },
+
+      // Custom range — fires when both dates filled
+      _onCustomDateChanged: function() {
+        if (this.customStart && this.customEnd) {
+          this.startDate = this.customStart;
+          this.endDate   = this.customEnd;
+        }
+      },
+
+      _toISODate: function(date) {
+        return date.toISOString().split('T')[0];
+      },
+
+      // ─────────────────────────────────
+      // Chart helper functions
+      // ─────────────────────────────────
+
+      // ES returns [{key:"2026-01-01", value:5}, ...]
+      // _labels → X axis: ["2026-01-01", "2026-02-01", ...]
+      _labels: function(data) {
+        if (!data || !data.length) return [];
+        return data.map(function(entry) {
+          return entry.key;
+        });
+      },
+
+      // _values → Y axis: [[5, 8, 3, ...]]
+      // Outer array = multiple series support
+      // Inner array = data points for series 1
+      _values: function(data) {
+        if (!data || !data.length) return [[]];
+        return [data.map(function(entry) {
+          return entry.value;
+        })];
+      },
+
+      // Makes endDate inclusive of the full day
+      // "2026-06-25" → "2026-06-25T23:59:59.999Z"
+      // Without this, ES misses docs created after midnight
+      _extendEndDate: function(date) {
+        if (!date) return date;
+        var d = new Date(date);
+        d.setDate(d.getDate() + 1);
+        d.setMilliseconds(d.getMilliseconds() - 1);
+        return d.toISOString();
+      }
+
+    });
+  </script>
+
+</dom-module>
