@@ -282,7 +282,7 @@
       index="[[index]]">
     </nuxeo-repository-data>
 
-    <!-- Storage growth per month: sum of file sizes (bytes -> GB) -->
+    <!-- Storage growth per month: sum of file sizes in bytes (unit chosen at render) -->
     <nuxeo-repository-data
       start-date="[[startDate]]"
       end-date="[[_extendEndDate(endDate)]]"
@@ -373,14 +373,14 @@
 
                   <div class="hero-divider-v"></div>
 
-                  <!-- Right: storage growth in GB -->
+                  <!-- Right: storage growth, unit auto-scaled (KB/MB/GB/TB) -->
                   <div class="hero-half">
-                    <div class="chart-sub-title">Storage Growth (GB)</div>
+                    <div class="chart-sub-title">Storage Growth</div>
                     <div class="chart-box">
                       <chart-bar
                         labels="[[_labels(storagePerMonth)]]"
                         values="[[_storageValues(storagePerMonth)]]"
-                        series='["Storage (GB)"]'
+                        series="[[_storageSeries(storagePerMonth)]]"
                         options='{"responsive":true,"maintainAspectRatio":false,"legend":{"display":true,"position":"top","labels":{"boxWidth":10,"fontSize":11,"padding":12}},"animation":false,"scales":{"xAxes":[{"gridLines":{"display":false,"drawBorder":false},"ticks":{"autoSkip":false,"maxRotation":30,"fontSize":11,"fontColor":"#9e9e9e"}}],"yAxes":[{"gridLines":{"color":"rgba(0,0,0,0.04)","drawBorder":false},"ticks":{"beginAtZero":true,"fontSize":11,"fontColor":"#9e9e9e"}}]},"tooltips":{"mode":"index","intersect":false}}'>
                       </chart-bar>
                     </div>
@@ -490,7 +490,7 @@
           value: function() { return []; }
         },
 
-        // Storage (sum of file sizes) per month
+        // Storage (sum of file sizes) per month, in bytes
         storagePerMonth: {
           type: Array,
           value: function() { return []; }
@@ -582,19 +582,42 @@
         })];
       },
 
-      // Storage values converted from bytes to GB
+      // ── Storage helpers ──
+
+      // Largest monthly value in bytes — used to pick a sensible unit
+      _storageMax: function(data) {
+        if (!data || !data.length) return 0;
+        return data.reduce(function(max, entry) {
+          var v = entry.value || 0;
+          return v > max ? v : max;
+        }, 0);
+      },
+
+      // Picks the display unit so small test data isn't rounded to zero
+      _storageUnit: function(data) {
+        var max = this._storageMax(data);
+        if (max >= 1099511627776) return { name: 'TB', divisor: 1099511627776 };
+        if (max >= 1073741824)    return { name: 'GB', divisor: 1073741824 };
+        if (max >= 1048576)       return { name: 'MB', divisor: 1048576 };
+        return { name: 'KB', divisor: 1024 };
+      },
+
+      // Converts each month's bytes into the chosen unit
       _storageValues: function(data) {
         if (!data || !data.length) return [[]];
-        var self = this;
+        var unit = this._storageUnit(data);
         return [data.map(function(entry) {
-          return self._bytesToGB(entry.value);
+          var v = (entry.value || 0) / unit.divisor;
+          return Math.round(v * 100) / 100;
         })];
       },
 
-      _bytesToGB: function(bytes) {
-        if (!bytes) return 0;
-        return Math.round((bytes / 1073741824) * 100) / 100;
+      // Legend / axis label reflects the chosen unit
+      _storageSeries: function(data) {
+        return ['Storage (' + this._storageUnit(data).name + ')'];
       },
+
+      // ── File-type helpers ──
 
       // Pie labels: friendly names derived from each mime-type bucket key
       _typeLabels: function(data) {
