@@ -178,19 +178,13 @@ IMPORTANT — query safety:
                   </div>
 
                   <div class="kpi-cell">
-                    <span class="kpi-value">[[_formatCount(_migratedTotal(migratedGroups))]]</span>
+                    <span class="kpi-value">[[_migratedTotal(migratedGroups)]]</span>
                     <span class="kpi-label">From migrated use cases</span>
                   </div>
 
                   <div class="kpi-cell">
-                    <span class="kpi-value">[[_formatCount(_nonMigrated(totalCount, migratedGroups))]]</span>
+                    <span class="kpi-value">[[_nonMigrated(totalCount, migratedGroups)]]</span>
                     <span class="kpi-label">From non-migrated use cases</span>
-                  </div>
-
-                  <div class="kpi-cell kpi-insight">
-                    <span class="kpi-insight-text">
-                      Migrated use cases contribute [[_migratedPct(totalCount, migratedGroups)]]% of total usage in this period.
-                    </span>
                   </div>
 
                 </div>
@@ -300,6 +294,38 @@ IMPORTANT — query safety:
                     <span class="num">[[totalCount]]</span>
                     <span class="lbl">Total</span>
                   </div>
+                </div>
+              </nuxeo-card>
+
+              <!-- ===== SLOT 3 ===== -->
+              <nuxeo-card heading="Slot 3">
+                <div class="slot-placeholder">
+                  <iron-icon icon="icons:insert-chart"></iron-icon>
+                  <span class="placeholder-label">Coming soon</span>
+                </div>
+              </nuxeo-card>
+
+              <!-- ===== SLOT 4 ===== -->
+              <nuxeo-card heading="Slot 4">
+                <div class="slot-placeholder">
+                  <iron-icon icon="icons:insert-chart"></iron-icon>
+                  <span class="placeholder-label">Coming soon</span>
+                </div>
+              </nuxeo-card>
+
+              <!-- ===== SLOT 5 ===== -->
+              <nuxeo-card heading="Slot 5">
+                <div class="slot-placeholder">
+                  <iron-icon icon="icons:insert-chart"></iron-icon>
+                  <span class="placeholder-label">Coming soon</span>
+                </div>
+              </nuxeo-card>
+
+              <!-- ===== SLOT 6 ===== -->
+              <nuxeo-card heading="Slot 6">
+                <div class="slot-placeholder">
+                  <iron-icon icon="icons:insert-chart"></iron-icon>
+                  <span class="placeholder-label">Coming soon</span>
                 </div>
               </nuxeo-card>
 
