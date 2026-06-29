@@ -152,12 +152,23 @@ Two different mechanisms are used, each chosen for how it scales:
          histogram (docsPerMonth), so non-migrated = all - migrated.
          ============================================================ -->
     <template is="dom-repeat" items="[[_months]]" as="m">
+      <!-- Migrated docs in this month -->
       <nuxeo-page-provider
         auto
         page-size="1"
         query="[[_monthMigratedQuery(m)]]"
         current-page="{{_ignoredMonthPage}}"
         results-count="{{m.migrated}}"
+        on-results-count-changed="_onMonthCount">
+      </nuxeo-page-provider>
+      <!-- Total docs in this month (so non-migrated = total - migrated, no
+           dependence on histogram key matching) -->
+      <nuxeo-page-provider
+        auto
+        page-size="1"
+        query="[[_monthTotalQuery(m)]]"
+        current-page="{{_ignoredMonthPage2}}"
+        results-count="{{m.all}}"
         on-results-count-changed="_onMonthCount">
       </nuxeo-page-provider>
     </template>
@@ -410,8 +421,7 @@ Two different mechanisms are used, each chosen for how it scales:
       behaviors: [Nuxeo.LayoutBehavior],
 
       observers: [
-        '_buildMonths(startDate, endDate)',
-        '_refreshMonthly(docsPerMonth)'
+        '_buildMonths(startDate, endDate)'
       ],
 
       properties: {
@@ -452,7 +462,8 @@ Two different mechanisms are used, each chosen for how it scales:
         // we only read results-count (the total match count)
         _ignoredTotalPage:    { type: Array },
         _ignoredMigratedPage: { type: Array },
-        _ignoredMonthPage:    { type: Array }
+        _ignoredMonthPage:    { type: Array },
+        _ignoredMonthPage2:   { type: Array }
 
       },
 
@@ -612,46 +623,41 @@ Two different mechanisms are used, each chosen for how it scales:
                "AND fid_migration:migrationHistory/*1/systemName IS NOT NULL";
       },
 
+      // NXQL for one month's TOTAL document count (same filters, no migration
+      // predicate). Used so non-migrated = total - migrated comes purely from
+      // queries, with no dependence on aggregation histogram key formats.
+      _monthTotalQuery: function(m) {
+        if (!m || !m.start || !m.end) return '';
+        return "SELECT * FROM Document WHERE ecm:isVersion = 0 " +
+               "AND ecm:isTrashed = 0 " +
+               "AND dc:created BETWEEN TIMESTAMP '" + m.start +
+               "' AND TIMESTAMP '" + m.end + "'";
+      },
+
       // Fires when any month's page-provider writes its results-count.
       // We authoritatively copy the new count onto the matching _months item
       // via the dom-repeat model (Polymer's array-safe path), rather than
       // relying only on the implicit {{m.migrated}} write-through. Then we
       // rebuild the chart rows. e and e.model are guarded so this never
       // throws if the event shape is unexpected.
-      _onMonthCount: function(e) {
-        try {
-          if (e && e.model && e.model.m && typeof e.detail !== 'undefined') {
-            var val = (e.detail && typeof e.detail.value !== 'undefined')
-                      ? e.detail.value : e.model.m.migrated;
-            if (typeof val === 'number') {
-              e.model.set('m.migrated', val);
-            }
-          }
-        } catch (err) {
-          // ignore — _refreshMonthly below still reads whatever is current
-        }
+      // Fires when any per-month provider writes its results-count (either the
+      // migrated query into m.migrated, or the total query into m.all). The
+      // two-way {{m.migrated}} / {{m.all}} bindings already write the value
+      // onto the _months item; we just rebuild the chart rows from the current
+      // _months state. Wrapped defensively so an odd event can never throw.
+      _onMonthCount: function() {
         this._refreshMonthly();
       },
 
-      // Assemble monthlyMigrated from _months + the all-docs histogram.
-      // We key the histogram by the SAME friendly label (_toMonthYear) used
-      // for the month buckets, instead of slicing raw keys. The histogram's
-      // key format from with-date-intervals can vary (full date, YYYY-MM, or
-      // a timestamp), and _toMonthYear normalises any of those to "Mon-YY".
-      // Matching on that normalised label is what the working Overall chart
-      // effectively does, so the document counts line up reliably.
+      // Assemble monthlyMigrated straight from the per-month query results.
+      // Each month descriptor now carries its own `migrated` and `all` counts
+      // (both from page-provider results-count). Non-migrated = all - migrated.
+      // No histogram, no key-format matching — the values come from queries.
       _refreshMonthly: function() {
-        var self = this;
-        var docMap = {};
-        (this.docsPerMonth || []).forEach(function(entry) {
-          var lbl = self._toMonthYear(entry.key);
-          docMap[lbl] = (docMap[lbl] || 0) + (entry.value || 0);
-        });
-
         var rows = (this._months || []).map(function(m) {
-          var all = docMap[m.label] || 0;
           var migrated = m.migrated || 0;
-          if (migrated > all) all = migrated; // safety: never negative non-migrated
+          var all = m.all || 0;
+          if (migrated > all) all = migrated; // safety: never negative
           return {
             key:          m.key,
             label:        m.label,
@@ -660,7 +666,6 @@ Two different mechanisms are used, each chosen for how it scales:
             all:          all
           };
         });
-
         this.monthlyMigrated = rows;
       },
 
