@@ -421,7 +421,8 @@ Two different mechanisms are used, each chosen for how it scales:
       behaviors: [Nuxeo.LayoutBehavior],
 
       observers: [
-        '_buildMonths(startDate, endDate)'
+        '_buildMonths(startDate, endDate)',
+        '_refreshMonthly(_months.*)'
       ],
 
       properties: {
