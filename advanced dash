@@ -634,18 +634,22 @@ Two different mechanisms are used, each chosen for how it scales:
       },
 
       // Assemble monthlyMigrated from _months + the all-docs histogram.
+      // We key the histogram by the SAME friendly label (_toMonthYear) used
+      // for the month buckets, instead of slicing raw keys. The histogram's
+      // key format from with-date-intervals can vary (full date, YYYY-MM, or
+      // a timestamp), and _toMonthYear normalises any of those to "Mon-YY".
+      // Matching on that normalised label is what the working Overall chart
+      // effectively does, so the document counts line up reliably.
       _refreshMonthly: function() {
         var self = this;
         var docMap = {};
         (this.docsPerMonth || []).forEach(function(entry) {
-          // histogram keys may be "2026-03-01" or "2026-03"; normalise to YYYY-MM
-          var k = String(entry.key).slice(0, 7);
-          docMap[k] = entry.value || 0;
+          var lbl = self._toMonthYear(entry.key);
+          docMap[lbl] = (docMap[lbl] || 0) + (entry.value || 0);
         });
 
         var rows = (this._months || []).map(function(m) {
-          var ym = String(m.key).slice(0, 7);
-          var all = docMap[ym] || 0;
+          var all = docMap[m.label] || 0;
           var migrated = m.migrated || 0;
           if (migrated > all) all = migrated; // safety: never negative non-migrated
           return {
@@ -708,16 +712,41 @@ Two different mechanisms are used, each chosen for how it scales:
         return data.map(function(entry) { return self._toMonthYear(entry.key); });
       },
 
-      // "2026-03-01" or "2026-03" -> "Mar-26"
+      // Normalise any month-bucket key to "Mon-YY" (e.g. "Mar-26").
+      // Handles three formats the histogram may emit:
+      //   - "2026-03-01" or "2026-03"  (dash-separated date)
+      //   - "2026-03-01T00:00:00.000Z" (full ISO datetime)
+      //   - 1740787200000              (epoch milliseconds, number or string)
       _toMonthYear: function(key) {
-        if (!key) return '';
+        if (key === null || typeof key === 'undefined' || key === '') return '';
         var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-        var parts = String(key).split('-');
-        if (parts.length < 2) return key;
-        var year = parts[0];
-        var monthIdx = parseInt(parts[1], 10) - 1;
-        if (monthIdx < 0 || monthIdx > 11) return key;
-        return months[monthIdx] + '-' + year.slice(-2);
+
+        // Pure number (or numeric string) that is not a dash-date => epoch ms.
+        var str = String(key);
+        if (/^\d{10,}$/.test(str)) {
+          var dms = new Date(parseInt(str, 10));
+          if (!isNaN(dms.getTime())) {
+            return months[dms.getMonth()] + '-' + String(dms.getFullYear()).slice(-2);
+          }
+        }
+
+        // Dash-separated date or ISO datetime: take the date part before 'T'.
+        var datePart = str.split('T')[0];
+        var parts = datePart.split('-');
+        if (parts.length >= 2) {
+          var year = parts[0];
+          var monthIdx = parseInt(parts[1], 10) - 1;
+          if (monthIdx >= 0 && monthIdx <= 11 && year.length === 4) {
+            return months[monthIdx] + '-' + year.slice(-2);
+          }
+        }
+
+        // Last resort: let Date try to parse it.
+        var d = new Date(str);
+        if (!isNaN(d.getTime())) {
+          return months[d.getMonth()] + '-' + String(d.getFullYear()).slice(-2);
+        }
+        return str;
       },
 
       /* ==========================================================
