@@ -3,7 +3,8 @@
 @group Nuxeo UI
 @element fid-analytical-dashboard
 
-Monthly usage / growth dashboard.
+Monthly usage / growth dashboard, designed for very large repositories
+(billion-document scale).
 
 Layout:
   - Header card   : title + period selector (+ custom date range)
@@ -14,17 +15,34 @@ Layout:
                     By Format   -> pie of documents per mime-type
                     By Size     -> storage added per month (bar, GB/MB auto)
   - Slot 2        : Migration adoption donut (migrated vs non-migrated)
+  - Slots 3-6     : reserved (Coming soon)
 
 Shared CSS lives in fid-dashboard-styles.html and is imported below.
 
-IMPORTANT — query safety:
-  Every aggregation below uses either no filter or `grouped-by`. We do NOT
-  use the `where` attribute anywhere: on this build, `where` with range
-  comparisons (<=, >) or with LIKE / IS NOT NULL crashes the page. `grouped-by`
-  and unfiltered metrics are the proven-safe patterns, so the dashboard sticks
-  to those. Migrated docs are counted by grouping on the migrationHistory
-  sub-field (empty arrays are skipped by the aggregation, so the grouped
-  buckets represent migrated docs only).
+=====================================================================
+SCALABILITY NOTES (billion-document design)
+=====================================================================
+Two different mechanisms are used, each chosen for how it scales:
+
+1. CHARTS (growth, storage, type/format breakdown) use nuxeo-repository-data
+   aggregations: grouped-by, with-date-intervals, sum(...). These are
+   Elasticsearch aggregations — ES computes them across the whole index and
+   returns only the buckets (a handful of rows), never the documents. This
+   scales to a billion docs by design.
+
+2. MIGRATION COUNTS use nuxeo-page-provider with NXQL and page-size="1",
+   reading ONLY resultsCount. This returns a single filtered count without
+   fetching documents, so it also scales. We deliberately do NOT count
+   migrated docs with a term aggregation (grouped-by on systemName): at scale
+   that would need one bucket per distinct source system and, capped by
+   group-limit, would silently undercount. A filtered resultsCount is exact
+   and scale-safe.
+
+   We avoid the `where` attribute on nuxeo-repository-data entirely: on this
+   build it crashes on ranges / LIKE / IS NOT NULL. NXQL inside a page
+   provider supports the complex-field IS NOT NULL predicate correctly and
+   fails gracefully instead of taking the page down.
+=====================================================================
 -->
 
 <!-- Import the shared style module so this file stays focused on markup + logic -->
@@ -36,8 +54,8 @@ IMPORTANT — query safety:
     <style include="iron-flex iron-flex-alignment nuxeo-styles fid-dashboard-styles"></style>
 
     <!-- ============================================================
-         DATA ELEMENTS (no UI — each fetches one aggregation).
-         They re-run automatically whenever startDate / endDate change.
+         CHART DATA — Elasticsearch aggregations (scale-safe).
+         Re-run automatically when startDate / endDate change.
          ============================================================ -->
 
     <!-- Documents created per month (Overall line) -->
@@ -81,15 +99,6 @@ IMPORTANT — query safety:
       index="[[index]]">
     </nuxeo-repository-data>
 
-    <!-- Total document count over the period (KPI strip + donut) -->
-    <nuxeo-repository-data
-      start-date="[[startDate]]"
-      end-date="[[_extendEndDate(endDate)]]"
-      metrics="cardinality(ecm:uuid)"
-      data="{{totalCount}}"
-      index="[[index]]">
-    </nuxeo-repository-data>
-
     <!-- Total storage over the period: sum of file sizes in bytes (KPI strip) -->
     <nuxeo-repository-data
       start-date="[[startDate]]"
@@ -99,17 +108,33 @@ IMPORTANT — query safety:
       index="[[index]]">
     </nuxeo-repository-data>
 
-    <!-- Migrated docs grouped by migrationHistory sub-field.
-         Empty arrays are skipped by the aggregation, so every bucket here is a
-         migrated document. Summing the bucket counts gives the migrated total. -->
-    <nuxeo-repository-data
-      start-date="[[startDate]]"
-      end-date="[[_extendEndDate(endDate)]]"
-      grouped-by="fid_migration:migrationHistory/*1/systemName"
-      group-limit="50"
-      data="{{migratedGroups}}"
-      index="[[index]]">
-    </nuxeo-repository-data>
+    <!-- ============================================================
+         COUNTS — NXQL page providers, resultsCount only (scale-safe).
+
+         page-size="1" + reading resultsCount means ES returns the match
+         count without fetching documents. Dates are injected as query
+         parameters so the counts respect the selected period.
+         ============================================================ -->
+
+    <!-- Total documents in the period -->
+    <nuxeo-page-provider
+      auto
+      page-size="1"
+      query="SELECT * FROM Document WHERE ecm:isVersion = 0 AND ecm:isTrashed = 0 AND dc:created BETWEEN ? AND ?"
+      query-params="[[_countParams(startDate, endDate)]]"
+      current-page="{{_ignoredTotalPage}}"
+      number-of-results="{{totalCount}}">
+    </nuxeo-page-provider>
+
+    <!-- Migrated documents in the period: migrationHistory has at least one entry -->
+    <nuxeo-page-provider
+      auto
+      page-size="1"
+      query="SELECT * FROM Document WHERE ecm:isVersion = 0 AND ecm:isTrashed = 0 AND dc:created BETWEEN ? AND ? AND fid_migration:migrationHistory/*1/systemName IS NOT NULL"
+      query-params="[[_countParams(startDate, endDate)]]"
+      current-page="{{_ignoredMigratedPage}}"
+      number-of-results="{{migratedCount}}">
+    </nuxeo-page-provider>
 
     <!-- ============================================================
          PAGE
@@ -178,12 +203,12 @@ IMPORTANT — query safety:
                   </div>
 
                   <div class="kpi-cell">
-                    <span class="kpi-value">[[_migratedTotal(migratedGroups)]]</span>
+                    <span class="kpi-value">[[migratedCount]]</span>
                     <span class="kpi-label">From migrated use cases</span>
                   </div>
 
                   <div class="kpi-cell">
-                    <span class="kpi-value">[[_nonMigrated(totalCount, migratedGroups)]]</span>
+                    <span class="kpi-value">[[_nonMigrated(totalCount, migratedCount)]]</span>
                     <span class="kpi-label">From non-migrated use cases</span>
                   </div>
 
@@ -272,22 +297,22 @@ IMPORTANT — query safety:
                 <div class="donut-wrap">
                   <chart-pie
                     labels="[[_migrationLabels()]]"
-                    values="[[_migrationValues(totalCount, migratedGroups)]]"
+                    values="[[_migrationValues(totalCount, migratedCount)]]"
                     colors='["#2e7d32","#d32f2f"]'
                     options='{"responsive":true,"maintainAspectRatio":false,"cutoutPercentage":68,"legend":{"display":true,"position":"bottom","labels":{"boxWidth":12,"fontSize":11,"padding":12}},"animation":false,"tooltips":{"enabled":true}}'>
                   </chart-pie>
                   <div class="donut-center">
-                    <span class="pct">[[_migratedPct(totalCount, migratedGroups)]]%</span>
+                    <span class="pct">[[_migratedPct(totalCount, migratedCount)]]%</span>
                     <span class="pct-label">MIGRATED</span>
                   </div>
                 </div>
                 <div class="migration-summary">
                   <div class="stat">
-                    <span class="num">[[_migratedTotal(migratedGroups)]]</span>
+                    <span class="num">[[migratedCount]]</span>
                     <span class="lbl">Migrated</span>
                   </div>
                   <div class="stat">
-                    <span class="num">[[_nonMigrated(totalCount, migratedGroups)]]</span>
+                    <span class="num">[[_nonMigrated(totalCount, migratedCount)]]</span>
                     <span class="lbl">Non-Migrated</span>
                   </div>
                   <div class="stat">
@@ -359,20 +384,21 @@ IMPORTANT — query safety:
         // ---- Elasticsearch index ----
         index:          { type: String, value: 'nuxeo' },
 
-        // ---- Overall view + By Size ----
+        // ---- Chart aggregations ----
         docsPerMonth:      { type: Array,  value: function() { return []; } },
         storagePerMonth:   { type: Array,  value: function() { return []; } },
-
-        // ---- By Doc Type / By Format pies ----
         byDocType:         { type: Array,  value: function() { return []; } },
         byFormat:          { type: Array,  value: function() { return []; } },
-
-        // ---- KPI + donut ----
-        totalCount:        { type: Number, value: 0 },
         totalStorageBytes: { type: Number, value: 0 },
 
-        // ---- Migration: docs grouped by migrationHistory sub-field ----
-        migratedGroups:    { type: Array,  value: function() { return []; } }
+        // ---- Migration counts (page-provider resultsCount) ----
+        totalCount:        { type: Number, value: 0 },
+        migratedCount:     { type: Number, value: 0 },
+
+        // current-page targets are required by nuxeo-page-provider but unused;
+        // we only read number-of-results (resultsCount)
+        _ignoredTotalPage:    { type: Array },
+        _ignoredMigratedPage: { type: Array }
 
       },
 
@@ -432,6 +458,14 @@ IMPORTANT — query safety:
         d.setDate(d.getDate() + 1);
         d.setMilliseconds(d.getMilliseconds() - 1);
         return d.toISOString().split('T')[0];
+      },
+
+      // Build the [start, end] parameter array for the count page providers.
+      // Returns null until both dates exist so the providers don't fire on
+      // an incomplete range.
+      _countParams: function(startDate, endDate) {
+        if (!startDate || !endDate) return null;
+        return [startDate, this._extendEndDate(endDate)];
       },
 
       /* ==========================================================
@@ -530,8 +564,12 @@ IMPORTANT — query safety:
       },
 
       // Options object: dataset 1 (documents) renders as a line on the right axis
+      // Both datasets (storage + documents) render as grouped bars on ONE
+      // shared Y-axis. We do NOT use a second axis: chart-elements builds its
+      // datasets internally, so a per-dataset line type / second axis can't be
+      // injected reliably, and an unused second axis falls back to a 0-1 scale.
+      // One axis keeps both bars readable and avoids that phantom scale.
       _overallOptions: function(storage) {
-        var unit = this._storageUnit(storage).name;
         return {
           responsive: true,
           maintainAspectRatio: false,
@@ -541,33 +579,15 @@ IMPORTANT — query safety:
             position: 'top',
             labels: { boxWidth: 10, fontSize: 11, padding: 12 }
           },
-          // Tell chart-elements the second dataset is a line, not a bar
-          datasets: {
-            line: { type: 'line', yAxisID: 'y-docs', borderColor: '#1a73e8',
-                    backgroundColor: 'rgba(26,115,232,0.05)', borderWidth: 2,
-                    fill: false, lineTension: 0.3, pointRadius: 3 }
-          },
           scales: {
             xAxes: [{
               gridLines: { display: false, drawBorder: false },
               ticks: { autoSkip: false, maxRotation: 30, fontSize: 11, fontColor: '#9e9e9e' }
             }],
-            yAxes: [
-              {
-                id: 'y-storage',
-                position: 'left',
-                gridLines: { color: 'rgba(0,0,0,0.04)', drawBorder: false },
-                ticks: { beginAtZero: true, fontSize: 11, fontColor: '#9e9e9e' },
-                scaleLabel: { display: true, labelString: 'Storage (' + unit + ')', fontSize: 11, fontColor: '#9e9e9e' }
-              },
-              {
-                id: 'y-docs',
-                position: 'right',
-                gridLines: { display: false, drawBorder: false },
-                ticks: { beginAtZero: true, fontSize: 11, fontColor: '#9e9e9e' },
-                scaleLabel: { display: true, labelString: 'Documents', fontSize: 11, fontColor: '#9e9e9e' }
-              }
-            ]
+            yAxes: [{
+              gridLines: { color: 'rgba(0,0,0,0.04)', drawBorder: false },
+              ticks: { beginAtZero: true, fontSize: 11, fontColor: '#9e9e9e' }
+            }]
           },
           tooltips: { mode: 'index', intersect: false }
         };
@@ -645,60 +665,53 @@ IMPORTANT — query safety:
       /* ==========================================================
          MIGRATION HELPERS
 
-         migratedGroups is the grouped-by result on the migrationHistory
-         sub-field. Empty arrays are skipped by the aggregation, so summing
-         the bucket counts gives the migrated document total.
+         totalCount and migratedCount come from page-provider resultsCount
+         (filtered counts, scale-safe). Non-migrated is the difference.
          ========================================================== */
 
       _migrationLabels: function() {
         return ['Migrated', 'Non-Migrated'];
       },
 
-      // Sum of all migrated buckets = migrated document count
-      _migratedTotal: function(groups) {
-        if (!groups || !groups.length) return 0;
-        return groups.reduce(function(sum, entry) {
-          return sum + (entry.value || 0);
-        }, 0);
-      },
-
       // Non-migrated = total - migrated, never negative
-      _nonMigrated: function(total, groups) {
-        var diff = (total || 0) - this._migratedTotal(groups);
+      _nonMigrated: function(total, migrated) {
+        var diff = (total || 0) - (migrated || 0);
         return diff > 0 ? diff : 0;
       },
 
       // Donut values: [[migrated, nonMigrated]]
-      _migrationValues: function(total, groups) {
-        return [[this._migratedTotal(groups), this._nonMigrated(total, groups)]];
+      _migrationValues: function(total, migrated) {
+        return [[migrated || 0, this._nonMigrated(total, migrated)]];
       },
 
       // Migrated share of total, whole number
-      _migratedPct: function(total, groups) {
+      _migratedPct: function(total, migrated) {
         var t = total || 0;
         if (t <= 0) return 0;
-        return Math.round((this._migratedTotal(groups) / t) * 100);
+        return Math.round(((migrated || 0) / t) * 100);
       },
 
       /* ==========================================================
          KPI FORMATTING
          ========================================================== */
 
-      // 204000 -> "204K", 1500000 -> "1.5M"
+      // 204000 -> "204K", 1500000 -> "1.5M", 2300000000 -> "2.3B"
       _formatCount: function(n) {
         n = n || 0;
-        if (n >= 1000000) return (Math.round(n / 100000) / 10) + 'M';
-        if (n >= 1000)    return (Math.round(n / 100) / 10) + 'K';
+        if (n >= 1000000000) return (Math.round(n / 100000000) / 10) + 'B';
+        if (n >= 1000000)    return (Math.round(n / 100000) / 10) + 'M';
+        if (n >= 1000)       return (Math.round(n / 100) / 10) + 'K';
         return String(n);
       },
 
       // bytes -> "1.4 TB" / "512 MB" etc. for the KPI cell
       _formatStorage: function(bytes) {
         bytes = bytes || 0;
-        if (bytes >= 1099511627776) return (Math.round(bytes / 1099511627776 * 10) / 10) + ' TB';
-        if (bytes >= 1073741824)    return (Math.round(bytes / 1073741824 * 10) / 10) + ' GB';
-        if (bytes >= 1048576)       return (Math.round(bytes / 1048576 * 10) / 10) + ' MB';
-        if (bytes >= 1024)          return (Math.round(bytes / 1024 * 10) / 10) + ' KB';
+        if (bytes >= 1125899906842624) return (Math.round(bytes / 1125899906842624 * 10) / 10) + ' PB';
+        if (bytes >= 1099511627776)    return (Math.round(bytes / 1099511627776 * 10) / 10) + ' TB';
+        if (bytes >= 1073741824)       return (Math.round(bytes / 1073741824 * 10) / 10) + ' GB';
+        if (bytes >= 1048576)          return (Math.round(bytes / 1048576 * 10) / 10) + ' MB';
+        if (bytes >= 1024)             return (Math.round(bytes / 1024 * 10) / 10) + ' KB';
         return bytes + ' B';
       }
 
