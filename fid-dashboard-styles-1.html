@@ -1,0 +1,406 @@
+<!--
+`fid-dashboard-styles`
+
+Shared style module for fid-analytical-dashboard.
+Imported by the main element via:
+  <link rel="import" href="fid-dashboard-styles.html">
+  <style include="... fid-dashboard-styles"></style>
+
+Keeps all CSS in one place so the main file stays focused on markup + logic.
+Page background is green; cards stay the default Nuxeo white.
+-->
+<dom-module id="fid-dashboard-styles">
+  <template>
+    <style>
+
+      /* ---------- Base layout ---------- */
+      .page,
+      .content {
+        @apply --layout-vertical;
+      }
+
+      /* Page background matches the rest of Nuxeo; cards stay white */
+      .dashboard-container {
+        padding: 16px 24px 32px 24px;
+        background: var(--nuxeo-page-background, #f0f2f5);
+        min-height: 100vh;
+        box-sizing: border-box;
+      }
+
+      /* ---------- Header card: title left, divider, controls right ---------- */
+      .header-slot {
+        display: flex;
+        flex-direction: row;
+        align-items: center;
+        justify-content: space-between;
+        flex-wrap: nowrap;
+        gap: 24px;
+        padding: 8px 4px;
+      }
+
+      .header-left {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        flex: 1;
+        min-width: 0;
+      }
+
+      .header-left h1 {
+        font-size: 20px;
+        font-weight: 500;
+        color: var(--nuxeo-text-default, #212121);
+        margin: 0;
+        letter-spacing: -0.2px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .header-left p {
+        font-size: 12px;
+        color: var(--nuxeo-text-light, #9e9e9e);
+        margin: 0;
+        font-weight: 400;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .header-divider {
+        width: 1px;
+        height: 40px;
+        background: var(--nuxeo-border, #e0e0e0);
+        flex-shrink: 0;
+      }
+
+      .header-controls {
+        display: flex;
+        flex-direction: row;
+        align-items: flex-end;
+        gap: 16px;
+        flex-shrink: 0;
+        flex-wrap: wrap;
+      }
+
+      .header-controls nuxeo-select {
+        min-width: 150px;
+      }
+
+      /* ---------- Custom date pickers ---------- */
+      .custom-dates {
+        display: flex;
+        flex-direction: row;
+        align-items: flex-end;
+        gap: 12px;
+      }
+
+      .date-field {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .date-field label {
+        font-size: 11px;
+        color: var(--nuxeo-text-light, #9e9e9e);
+        font-weight: 500;
+        text-transform: uppercase;
+        letter-spacing: 0.6px;
+      }
+
+      .date-field input[type="date"] {
+        padding: 0 10px;
+        border: 1px solid var(--nuxeo-border, #e0e0e0);
+        border-radius: 2px;
+        font-size: 13px;
+        color: var(--nuxeo-text-default, #333);
+        background: white;
+        height: 32px;
+        box-sizing: border-box;
+        font-family: var(--nuxeo-app-font, 'Roboto', sans-serif);
+        transition: border-color 0.15s ease;
+      }
+
+      .date-field input[type="date"]:focus {
+        outline: none;
+        border-color: var(--nuxeo-primary-color, #1a73e8);
+        box-shadow: 0 0 0 2px rgba(26, 115, 232, 0.12);
+      }
+
+      /* ---------- KPI strip ---------- */
+      .kpi-strip {
+        display: flex;
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: stretch;
+      }
+
+      .kpi-cell {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        flex: 1 1 0;
+        min-width: 120px;
+        padding: 4px 20px;
+        border-right: 1px solid var(--nuxeo-border, #eee);
+      }
+
+      .kpi-cell:last-child {
+        border-right: none;
+      }
+
+      .kpi-value {
+        font-size: 26px;
+        font-weight: 600;
+        color: var(--nuxeo-text-default, #1a73e8);
+        line-height: 1.1;
+      }
+
+      .kpi-label {
+        font-size: 11px;
+        color: var(--nuxeo-text-light, #9e9e9e);
+        margin-top: 4px;
+        letter-spacing: 0.2px;
+      }
+
+      /* Insight cell reads as a sentence, not a number */
+      .kpi-cell.kpi-insight {
+        flex: 1.4 1 0;
+        min-width: 180px;
+      }
+
+      .kpi-insight-text {
+        font-size: 12px;
+        font-style: italic;
+        color: var(--nuxeo-text-default, #555);
+        line-height: 1.5;
+      }
+
+      /* ---------- Card grid ---------- */
+      .flex-layout {
+        display: flex;
+        flex-wrap: wrap;
+        margin: 16px -8px 0 -8px;
+      }
+
+      /* Tight = no top margin (used for KPI strip directly under header) */
+      .flex-layout.tight {
+        margin-top: 8px;
+      }
+
+      .flex-layout nuxeo-card {
+        flex: 1 0 calc(33% - 16px);
+        margin: 0 8px 16px 8px;
+        box-sizing: border-box;
+      }
+
+      .flex-layout nuxeo-card.full-width {
+        flex: 1 0 calc(100% - 16px);
+      }
+
+      /* ---------- View tabs (Overall / By Doc Type / By Format / By Size) ---------- */
+      .view-tabs {
+        display: flex;
+        flex-direction: row;
+        gap: 4px;
+        margin: 4px 0 12px 0;
+        flex-wrap: wrap;
+      }
+
+      .view-tab {
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--nuxeo-text-light, #777);
+        padding: 6px 14px;
+        border-radius: 16px;
+        cursor: pointer;
+        user-select: none;
+        transition: background 0.15s ease, color 0.15s ease;
+      }
+
+      .view-tab:hover {
+        background: var(--nuxeo-page-background, #f0f2f5);
+      }
+
+      .view-tab.active {
+        background: var(--nuxeo-primary-color, #1a73e8);
+        color: white;
+      }
+
+      /* ---------- Chart titles + boxes ---------- */
+      .chart-sub-title {
+        font-size: 13px;
+        font-weight: 500;
+        color: var(--nuxeo-text-default, #555);
+        margin: 0 0 4px 4px;
+      }
+
+      /* Single hero chart — tall so the combined view reads clearly */
+      .chart-box {
+        position: relative;
+        width: 100%;
+        height: 380px;
+        margin-top: 8px;
+      }
+
+      .chart-box-small {
+        position: relative;
+        width: 100%;
+        height: 260px;
+        margin-top: 8px;
+      }
+
+      chart-line,
+      chart-bar,
+      chart-pie {
+        display: block;
+        width: 100% !important;
+        height: 100% !important;
+        font-size: 0.78rem;
+      }
+
+      /* ---------- Migration donut ---------- */
+      .donut-wrap {
+        position: relative;
+        width: 100%;
+        height: 240px;
+        margin-top: 8px;
+      }
+
+      .donut-center {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        pointer-events: none;
+      }
+
+      .donut-center .pct {
+        font-size: 30px;
+        font-weight: 600;
+        color: var(--nuxeo-text-default, #2e7d32);
+        line-height: 1;
+      }
+
+      .donut-center .pct-label {
+        font-size: 11px;
+        color: var(--nuxeo-text-light, #9e9e9e);
+        margin-top: 4px;
+        letter-spacing: 0.4px;
+      }
+
+      .migration-summary {
+        display: flex;
+        flex-direction: row;
+        justify-content: center;
+        gap: 24px;
+        margin-top: 12px;
+      }
+
+      .migration-summary .stat {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+      }
+
+      .migration-summary .stat .num {
+        font-size: 16px;
+        font-weight: 600;
+        color: var(--nuxeo-text-default, #333);
+      }
+
+      .migration-summary .stat .lbl {
+        font-size: 11px;
+        color: var(--nuxeo-text-light, #9e9e9e);
+        margin-top: 2px;
+      }
+
+      /* ---------- Placeholder slots ---------- */
+      .slot-placeholder {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        min-height: 200px;
+        gap: 10px;
+      }
+
+      .slot-placeholder iron-icon {
+        --iron-icon-width: 40px;
+        --iron-icon-height: 40px;
+        color: var(--nuxeo-border, #ddd);
+      }
+
+      .slot-placeholder .placeholder-label {
+        font-size: 12px;
+        color: var(--nuxeo-text-light, #bbb);
+        letter-spacing: 0.3px;
+      }
+
+      /* ---------- Empty-state inside a chart card ---------- */
+      .chart-empty {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 240px;
+        color: var(--nuxeo-text-light, #bbb);
+        font-size: 13px;
+      }
+
+      /* ---------- Responsive ---------- */
+      @media (max-width: 1100px) {
+        .flex-layout nuxeo-card {
+          flex: 1 0 calc(50% - 16px);
+        }
+      }
+
+      @media (max-width: 768px) {
+        .dashboard-container {
+          padding: 12px 16px 24px 16px;
+        }
+        .flex-layout nuxeo-card {
+          flex: 1 0 calc(100% - 16px);
+        }
+        .header-slot {
+          flex-direction: column;
+          align-items: flex-start;
+          gap: 16px;
+        }
+        .header-divider {
+          display: none;
+        }
+        .header-controls {
+          width: 100%;
+          flex-direction: column;
+          align-items: flex-start;
+        }
+        .header-controls nuxeo-select {
+          width: 100%;
+        }
+        .custom-dates {
+          flex-direction: column;
+          width: 100%;
+        }
+        .date-field input[type="date"] {
+          width: 100%;
+        }
+        .kpi-cell {
+          flex: 1 1 45%;
+          border-right: none;
+          border-bottom: 1px solid var(--nuxeo-border, #eee);
+          padding: 12px 16px;
+        }
+        .chart-box {
+          height: 300px;
+        }
+      }
+
+    </style>
+  </template>
+</dom-module>
