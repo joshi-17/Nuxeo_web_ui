@@ -127,7 +127,7 @@ Two different mechanisms are used, each chosen for how it scales:
       page-size="1"
       query="[[_totalQuery(startDate, endDate)]]"
       current-page="{{_ignoredTotalPage}}"
-      number-of-results="{{totalCount}}">
+      results-count="{{totalCount}}">
     </nuxeo-page-provider>
 
     <!-- Migrated documents in the period: migrationHistory has at least one entry -->
@@ -136,7 +136,7 @@ Two different mechanisms are used, each chosen for how it scales:
       page-size="1"
       query="[[_migratedQuery(startDate, endDate)]]"
       current-page="{{_ignoredMigratedPage}}"
-      number-of-results="{{migratedCount}}">
+      results-count="{{migratedCount}}">
     </nuxeo-page-provider>
 
 
@@ -400,7 +400,7 @@ Two different mechanisms are used, each chosen for how it scales:
         migratedCount:     { type: Number, value: 0 },
 
         // current-page targets are required by nuxeo-page-provider but unused;
-        // we only read number-of-results (resultsCount)
+        // we only read results-count (the total match count)
         _ignoredTotalPage:    { type: Array },
         _ignoredMigratedPage: { type: Array }
 
