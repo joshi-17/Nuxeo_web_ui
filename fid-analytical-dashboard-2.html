@@ -79,13 +79,24 @@ Two different mechanisms are used, each chosen for how it scales:
       index="[[index]]">
     </nuxeo-repository-data>
 
-    <!-- By Doc Type: documents grouped by primary type (pie) -->
+    <!-- By Doc Type: documents grouped by primary type (pie + Slot 4) -->
     <nuxeo-repository-data
       start-date="[[startDate]]"
       end-date="[[_extendEndDate(endDate)]]"
       grouped-by="ecm:primaryType"
       group-limit="10"
       data="{{byDocType}}"
+      index="[[index]]">
+    </nuxeo-repository-data>
+
+    <!-- Storage by Doc Type: sum of file sizes grouped by primary type (Slot 5) -->
+    <nuxeo-repository-data
+      start-date="[[startDate]]"
+      end-date="[[_extendEndDate(endDate)]]"
+      grouped-by="ecm:primaryType"
+      group-limit="10"
+      metrics="sum(file:content.length)"
+      data="{{storageByDocType}}"
       index="[[index]]">
     </nuxeo-repository-data>
 
@@ -172,7 +183,32 @@ Two different mechanisms are used, each chosen for how it scales:
       </nuxeo-page-provider>
     </template>
 
+    <!-- ============================================================
+         PER-USE-CASE MIGRATION STATUS (Slots 4 & 5).
 
+         _useCaseTypes holds the distinct primary types shown across the two
+         Top-5 lists. For each, two bounded count queries (total + migrated in
+         the period). Status = "Migrated" when migrated == total (all of that
+         type are migrated), else "Not Yet". Bounded and scale-safe.
+         ============================================================ -->
+    <template is="dom-repeat" items="[[_useCaseTypes]]" as="t">
+      <nuxeo-page-provider
+        auto
+        page-size="1"
+        query="[[_typeTotalQuery(t, startDate, endDate)]]"
+        current-page="{{_ignoredTypePage}}"
+        results-count="{{_noopC}}"
+        on-results-count-changed="_onTypeTotalCount">
+      </nuxeo-page-provider>
+      <nuxeo-page-provider
+        auto
+        page-size="1"
+        query="[[_typeMigratedQuery(t, startDate, endDate)]]"
+        current-page="{{_ignoredTypePage2}}"
+        results-count="{{_noopD}}"
+        on-results-count-changed="_onTypeMigratedCount">
+      </nuxeo-page-provider>
+    </template>
 
     <!-- ============================================================
          PAGE
@@ -194,18 +230,26 @@ Two different mechanisms are used, each chosen for how it scales:
 
                 <div class="header-left">
                   <h1>Analytical Dashboard</h1>
-                  <p>Monthly usage tracking, growth metrics and adoption overview</p>
+                  <p>Nuxeo usage tracking dashboard</p>
                 </div>
 
                 <div class="header-divider"></div>
 
                 <div class="header-controls">
-                  <nuxeo-select
-                    label="Period"
-                    selected="{{selectedPeriod}}"
-                    options='["1month","2months","3months","4months","6months","8months","10months","1year","custom"]'
-                    on-selected-changed="_onPeriodChanged">
-                  </nuxeo-select>
+                  <div class="period-block">
+                    <div class="period-row">
+                      <nuxeo-select
+                        label="Period"
+                        selected="{{selectedPeriod}}"
+                        options='["1month","3months","6months","9months","1year","custom"]'
+                        on-selected-changed="_onPeriodChanged">
+                      </nuxeo-select>
+                      <iron-icon class="period-info-icon" icon="icons:info-outline"></iron-icon>
+                    </div>
+                    <div class="period-hint">
+                      The selected period is measured from today, going back the number of months you choose.
+                    </div>
+                  </div>
 
                   <!-- Custom date pickers appear only for the custom option -->
                   <template is="dom-if" if="[[_isCustom(selectedPeriod)]]">
@@ -232,12 +276,12 @@ Two different mechanisms are used, each chosen for how it scales:
 
                   <div class="kpi-cell">
                     <span class="kpi-value">[[_formatCount(totalCount)]]</span>
-                    <span class="kpi-label">New documents in period</span>
+                    <span class="kpi-label">New documents created</span>
                   </div>
 
                   <div class="kpi-cell">
                     <span class="kpi-value">[[_formatStorage(totalStorageBytes)]]</span>
-                    <span class="kpi-label">Storage added in period</span>
+                    <span class="kpi-label">of storage added</span>
                   </div>
 
                   <div class="kpi-cell">
@@ -381,19 +425,68 @@ Two different mechanisms are used, each chosen for how it scales:
               </nuxeo-card>
 
               <!-- ===== SLOT 4 ===== -->
-              <nuxeo-card heading="Slot 4">
-                <div class="slot-placeholder">
-                  <iron-icon icon="icons:insert-chart"></iron-icon>
-                  <span class="placeholder-label">Coming soon</span>
-                </div>
+              <!-- ===== SLOT 4: Top 5 Use Cases by document count ===== -->
+              <nuxeo-card heading="Top 5 Use Cases">
+                <div class="usecase-subhead">by document volume</div>
+                <template is="dom-if" if="[[!_isEmpty(topByDocs)]]">
+                  <div class="usecase-list">
+                    <div class="usecase-head-row">
+                      <span class="uc-rank-h">#</span>
+                      <span class="uc-name-h">USE CASE</span>
+                      <span class="uc-val-h">DOCS</span>
+                      <span class="uc-status-h">STATUS</span>
+                    </div>
+                    <template is="dom-repeat" items="[[topByDocs]]" as="row">
+                      <div class="usecase-row">
+                        <span class="uc-rank">[[_inc(index)]]</span>
+                        <div class="uc-main">
+                          <span class="uc-name">[[row.label]]</span>
+                          <div class="uc-bar"><div class="uc-bar-fill" style$="[[_barStyle(row.value, topByDocsMax)]]"></div></div>
+                        </div>
+                        <span class="uc-val">[[_formatCount(row.value)]]</span>
+                        <span class$="[[_statusClass(row.type, _statusVersion)]]">
+                          <iron-icon class="uc-status-icon" icon="[[_statusIcon(row.type, _statusVersion)]]"></iron-icon>
+                          [[_statusLabel(row.type, _statusVersion)]]
+                        </span>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+                <template is="dom-if" if="[[_isEmpty(topByDocs)]]">
+                  <div class="chart-empty">No documents found in this period</div>
+                </template>
               </nuxeo-card>
 
-              <!-- ===== SLOT 5 ===== -->
-              <nuxeo-card heading="Slot 5">
-                <div class="slot-placeholder">
-                  <iron-icon icon="icons:insert-chart"></iron-icon>
-                  <span class="placeholder-label">Coming soon</span>
-                </div>
+              <!-- ===== SLOT 5: Top 5 Use Cases by storage ===== -->
+              <nuxeo-card heading="Top 5 Use Cases">
+                <div class="usecase-subhead">by storage added</div>
+                <template is="dom-if" if="[[!_isEmpty(topByStorage)]]">
+                  <div class="usecase-list">
+                    <div class="usecase-head-row">
+                      <span class="uc-rank-h">#</span>
+                      <span class="uc-name-h">USE CASE</span>
+                      <span class="uc-val-h">STORAGE</span>
+                      <span class="uc-status-h">STATUS</span>
+                    </div>
+                    <template is="dom-repeat" items="[[topByStorage]]" as="row">
+                      <div class="usecase-row">
+                        <span class="uc-rank">[[_inc(index)]]</span>
+                        <div class="uc-main">
+                          <span class="uc-name">[[row.label]]</span>
+                          <div class="uc-bar"><div class="uc-bar-fill" style$="[[_barStyle(row.value, topByStorageMax)]]"></div></div>
+                        </div>
+                        <span class="uc-val">[[_formatStorage(row.value)]]</span>
+                        <span class$="[[_statusClass(row.type, _statusVersion)]]">
+                          <iron-icon class="uc-status-icon" icon="[[_statusIcon(row.type, _statusVersion)]]"></iron-icon>
+                          [[_statusLabel(row.type, _statusVersion)]]
+                        </span>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+                <template is="dom-if" if="[[_isEmpty(topByStorage)]]">
+                  <div class="chart-empty">No documents found in this period</div>
+                </template>
               </nuxeo-card>
 
               <!-- ===== SLOT 6 ===== -->
@@ -420,13 +513,15 @@ Two different mechanisms are used, each chosen for how it scales:
       behaviors: [Nuxeo.LayoutBehavior],
 
       observers: [
-        '_buildMonths(startDate, endDate)'
+        '_buildMonths(startDate, endDate)',
+        '_computeTopByDocs(byDocType)',
+        '_computeTopByStorage(storageByDocType)'
       ],
 
       properties: {
 
         // ---- Period selection ----
-        selectedPeriod: { type: String, value: '6months', observer: '_onPeriodChanged' },
+        selectedPeriod: { type: String, value: '1month', observer: '_onPeriodChanged' },
         startDate:      { type: String, notify: true },
         endDate:        { type: String, notify: true },
         customStart:    { type: String },
@@ -442,8 +537,23 @@ Two different mechanisms are used, each chosen for how it scales:
         docsPerMonth:      { type: Array,  value: function() { return []; } },
         storagePerMonth:   { type: Array,  value: function() { return []; } },
         byDocType:         { type: Array,  value: function() { return []; } },
+        storageByDocType:  { type: Array,  value: function() { return []; } },
         byFormat:          { type: Array,  value: function() { return []; } },
         totalStorageBytes: { type: Number, value: 0 },
+
+        // ---- Top 5 use cases (Slots 4 & 5) ----
+        // topByDocs / topByStorage: [{type, label, value}] top-5 lists.
+        // *Max: the largest value in each list (for the progress bar width).
+        // _useCaseTypes: distinct primary types across both lists; each gets
+        //   total + migrated counts to derive a migration status.
+        // _typeStatus: map of primaryType -> { total, migrated } filled live.
+        topByDocs:         { type: Array,  value: function() { return []; } },
+        topByStorage:      { type: Array,  value: function() { return []; } },
+        topByDocsMax:      { type: Number, value: 0 },
+        topByStorageMax:   { type: Number, value: 0 },
+        _useCaseTypes:     { type: Array,  value: function() { return []; } },
+        _typeStatus:       { type: Object, value: function() { return {}; } },
+        _statusVersion:    { type: Number, value: 0 },
 
         // ---- Migration counts (page-provider resultsCount) ----
         totalCount:        { type: Number, value: 0 },
@@ -463,8 +573,12 @@ Two different mechanisms are used, each chosen for how it scales:
         _ignoredMigratedPage: { type: Array },
         _ignoredMonthPage:    { type: Array },
         _ignoredMonthPage2:   { type: Array },
+        _ignoredTypePage:     { type: Array },
+        _ignoredTypePage2:    { type: Array },
         _noopA:               { type: Number },
-        _noopB:               { type: Number }
+        _noopB:               { type: Number },
+        _noopC:               { type: Number },
+        _noopD:               { type: Number }
 
       },
 
@@ -490,8 +604,7 @@ Two different mechanisms are used, each chosen for how it scales:
       // Turn a period option into start/end dates (today minus N months .. today)
       _computeDates: function(period) {
         var monthMap = {
-          '1month': 1, '2months': 2, '3months': 3, '4months': 4,
-          '6months': 6, '8months': 8, '10months': 10, '1year': 12
+          '1month': 1, '3months': 3, '6months': 6, '9months': 9, '1year': 12
         };
         var months = monthMap[period];
         if (!months) return;
@@ -580,8 +693,11 @@ Two different mechanisms are used, each chosen for how it scales:
       _buildMonths: function(startDate, endDate) {
         if (!startDate || !endDate) { this._months = []; return; }
 
-        var start = new Date(startDate);
-        var end   = new Date(endDate);
+        // Parse "YYYY-MM-DD" into a LOCAL date (new Date("YYYY-MM-DD") parses as
+        // UTC, which shifts the month by one in timezones behind UTC and made
+        // the chart drop the last month / start a month early).
+        var start = this._parseLocal(startDate);
+        var end   = this._parseLocal(endDate);
         var months = [];
 
         // Walk month by month from the start month to the end month.
@@ -599,10 +715,10 @@ Two different mechanisms are used, each chosen for how it scales:
           var mEnd   = lastOfMonth  > end   ? end   : lastOfMonth;
 
           months.push({
-            key:      this._toISODate(firstOfMonth),       // e.g. 2026-03-01
-            label:    this._toMonthYear(this._toISODate(firstOfMonth)),
-            start:    this._toTimestamp(this._toISODate(mStart), false),
-            end:      this._toTimestamp(this._toISODate(mEnd), true),
+            key:      this._toISOLocal(firstOfMonth),       // e.g. 2026-03-01
+            label:    this._toMonthYear(this._toISOLocal(firstOfMonth)),
+            start:    this._toTimestamp(this._toISOLocal(mStart), false),
+            end:      this._toTimestamp(this._toISOLocal(mEnd), true),
             migrated: 0,
             all:      0
           });
@@ -612,6 +728,28 @@ Two different mechanisms are used, each chosen for how it scales:
 
         this._months = months;
         this._refreshMonthly();
+      },
+
+      // Parse "YYYY-MM-DD" (or an ISO datetime) into a LOCAL-time Date, so month
+      // boundaries match the user's calendar rather than UTC.
+      _parseLocal: function(dateStr) {
+        var datePart = String(dateStr).split('T')[0];
+        var p = datePart.split('-');
+        var y = parseInt(p[0], 10);
+        var mo = parseInt(p[1], 10) - 1;
+        var d = parseInt(p[2], 10);
+        return new Date(y, mo, d);
+      },
+
+      // Format a Date as "YYYY-MM-DD" using its LOCAL parts (not UTC), so the
+      // month keys/labels/timestamps match the calendar the user sees.
+      _toISOLocal: function(date) {
+        var y = date.getFullYear();
+        var mo = String(date.getMonth() + 1);
+        var d = String(date.getDate());
+        if (mo.length < 2) mo = '0' + mo;
+        if (d.length < 2) d = '0' + d;
+        return y + '-' + mo + '-' + d;
       },
 
       // NXQL for one month's migrated count (dates already inlined).
@@ -824,7 +962,7 @@ Two different mechanisms are used, each chosen for how it scales:
 
       // Legend labels: storage unit is dynamic, documents fixed
       _overallSeries: function(storage) {
-        return ['Storage (' + this._storageUnit(storage).name + ')', 'Documents'];
+        return ['Storage added in (' + this._storageUnit(storage).name + ')', 'Number of documents created'];
       },
 
       // Options object: dataset 1 (documents) renders as a line on the right axis
@@ -990,6 +1128,157 @@ Two different mechanisms are used, each chosen for how it scales:
       // Green (migrated) + red (non-migrated) to match the donut
       _monthlyColors: function() {
         return ['#2e7d32', '#d32f2f'];
+      },
+
+      /* ==========================================================
+         TOP 5 USE CASES (Slots 4 & 5)
+
+         Use case = ecm:primaryType. Slot 4 ranks by document count
+         (byDocType), Slot 5 by storage added (storageByDocType). For each
+         row we also show a migration status: "Migrated" only when every
+         document of that type in the period is migrated, else "Not Yet".
+         The status counts come from bounded per-type page providers.
+         ========================================================== */
+
+      // Build the top-5 by document count, then refresh the type list.
+      _computeTopByDocs: function(data) {
+        var top = this._topN(data, 5);
+        this.topByDocs = top;
+        this.topByDocsMax = top.length ? top[0].value : 0;
+        this._rebuildUseCaseTypes();
+      },
+
+      // Build the top-5 by storage, then refresh the type list.
+      _computeTopByStorage: function(data) {
+        var top = this._topN(data, 5);
+        this.topByStorage = top;
+        this.topByStorageMax = top.length ? top[0].value : 0;
+        this._rebuildUseCaseTypes();
+      },
+
+      // Generic: sort buckets by value desc, take N, shape to {type,label,value}.
+      _topN: function(data, n) {
+        if (!data || !data.length) return [];
+        var self = this;
+        var copy = data.slice().sort(function(a, b) {
+          return (b.value || 0) - (a.value || 0);
+        });
+        return copy.slice(0, n).map(function(entry) {
+          return {
+            type:  entry.key,
+            label: self._friendlyDocType(entry.key),
+            value: entry.value || 0
+          };
+        });
+      },
+
+      // Friendly display name for a primary type (fallbacks to the raw type).
+      _friendlyDocType: function(type) {
+        if (!type) return 'Unknown';
+        var map = {
+          'File': 'File',
+          'Note': 'Note',
+          'Picture': 'Picture',
+          'Video': 'Video',
+          'Audio': 'Audio',
+          'BrokerageServiceDoc': 'Brokerage Service Doc'
+        };
+        if (map[type]) return map[type];
+        // Insert spaces before capitals for camelCase type names.
+        return String(type).replace(/([a-z])([A-Z])/g, '$1 $2');
+      },
+
+      // Distinct primary types across both top-5 lists (drives status queries).
+      _rebuildUseCaseTypes: function() {
+        var seen = {};
+        var types = [];
+        (this.topByDocs || []).concat(this.topByStorage || []).forEach(function(r) {
+          if (r && r.type && !seen[r.type]) { seen[r.type] = true; types.push(r.type); }
+        });
+        this._useCaseTypes = types;
+      },
+
+      // NXQL: total docs of a given primary type in the period.
+      _typeTotalQuery: function(t, startDate, endDate) {
+        var range = this._dateRangeClause(startDate, endDate);
+        if (!range || !t) return '';
+        return "SELECT * FROM Document WHERE ecm:isVersion = 0 " +
+               "AND ecm:isTrashed = 0 " + range +
+               " AND ecm:primaryType = '" + t + "'";
+      },
+
+      // NXQL: migrated docs of a given primary type in the period.
+      _typeMigratedQuery: function(t, startDate, endDate) {
+        var range = this._dateRangeClause(startDate, endDate);
+        if (!range || !t) return '';
+        return "SELECT * FROM Document WHERE ecm:isVersion = 0 " +
+               "AND ecm:isTrashed = 0 " + range +
+               " AND ecm:primaryType = '" + t + "'" +
+               " AND fid_migration:migrationHistory/*/systemName IS NOT NULL";
+      },
+
+      // Per-type count handlers: write into _typeStatus[type] and bump a version
+      // counter so the status helpers (which read _typeStatus) re-evaluate.
+      _onTypeTotalCount: function(e) {
+        if (!e || !e.model || !e.detail || typeof e.detail.value !== 'number') return;
+        this._setTypeStatus(e.model.t, 'total', e.detail.value);
+      },
+
+      _onTypeMigratedCount: function(e) {
+        if (!e || !e.model || !e.detail || typeof e.detail.value !== 'number') return;
+        this._setTypeStatus(e.model.t, 'migrated', e.detail.value);
+      },
+
+      _setTypeStatus: function(type, field, value) {
+        if (!type) return;
+        var status = this._typeStatus || {};
+        if (!status[type]) status[type] = { total: -1, migrated: -1 };
+        status[type][field] = value;
+        this._typeStatus = status;
+        // Bump a notifiable counter so class$/icon/label bindings recompute.
+        this._statusVersion++;
+      },
+
+      // Row number (index is 0-based).
+      _inc: function(index) {
+        return index + 1;
+      },
+
+      // Progress-bar inline width as a percentage of the list maximum.
+      _barStyle: function(value, max) {
+        var pct = (max && max > 0) ? Math.round((value / max) * 100) : 0;
+        if (pct < 4 && value > 0) pct = 4; // keep a sliver visible
+        return 'width:' + pct + '%';
+      },
+
+      // Status helpers. They depend on _statusVersion so Polymer re-runs them
+      // when counts arrive (the binding passes _statusVersion in, see template).
+      _statusState: function(type) {
+        var s = (this._typeStatus || {})[type];
+        if (!s || s.total < 0 || s.migrated < 0) return 'pending';
+        if (s.total === 0) return 'pending';
+        return (s.migrated >= s.total) ? 'migrated' : 'not-yet';
+      },
+
+      _statusClass: function(type, _v) {
+        var state = this._statusState(type);
+        if (state === 'migrated') return 'uc-status uc-status-migrated';
+        if (state === 'not-yet')  return 'uc-status uc-status-notyet';
+        return 'uc-status uc-status-pending';
+      },
+
+      _statusIcon: function(type, _v) {
+        var state = this._statusState(type);
+        if (state === 'migrated') return 'icons:check-circle';
+        if (state === 'not-yet')  return 'icons:cancel';
+        return 'icons:hourglass-empty';
+      },
+
+      _statusLabel: function(type, _v) {
+        var state = this._statusState(type);
+        if (state === 'migrated') return 'Migrated';
+        if (state === 'not-yet')  return 'Not Yet';
+        return '...';
       },
 
       /* ==========================================================
