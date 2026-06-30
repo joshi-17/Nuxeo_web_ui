@@ -122,6 +122,7 @@ Page background is green; cards stay the default Nuxeo white.
         transition: border-color 0.15s ease;
       }
 
+
       .date-field input[type="date"]:focus {
         outline: none;
         border-color: var(--nuxeo-primary-color, #1a73e8);
@@ -404,3 +405,6 @@ Page background is green; cards stay the default Nuxeo white.
     </style>
   </template>
 </dom-module>
+
+
+{{baseUrl}}/api/v1/search/lang/NXQL/execute?query=SELECT%20*%20FROM%20Document%20WHERE%20ecm:primaryType%20%3D%20'File'%20AND%20ecm:isVersion%20%3D%200%20AND%20ecm:isTrashed%20%3D%200&pageSize=5
