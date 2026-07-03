@@ -30,7 +30,7 @@ Two different mechanisms are used, each chosen for how it scales:
    returns only the buckets (a handful of rows), never the documents. This
    scales to a billion docs by design.
 
-2. MIGRATION COUNTS use nuxeo-page-provider with NXQL and page-size="1",
+2. MIGRATION COUNTS use nuxeo-page-provider with NXQL and page-size="0",
    reading ONLY resultsCount. This returns a single filtered count without
    fetching documents, so it also scales. We deliberately do NOT count
    migrated docs with a term aggregation (grouped-by on systemName): at scale
@@ -122,7 +122,7 @@ Two different mechanisms are used, each chosen for how it scales:
     <!-- ============================================================
          COUNTS — NXQL page providers, resultsCount only (scale-safe).
 
-         page-size="1" + reading resultsCount means ES returns the match
+         page-size="0" + reading resultsCount means ES returns the match
          count without fetching documents. Dates are injected as query
          parameters so the counts respect the selected period.
          ============================================================ -->
@@ -141,7 +141,7 @@ Two different mechanisms are used, each chosen for how it scales:
     <nuxeo-page-provider
       auto
       provider="default_search"
-      page-size="1"
+      page-size="0"
       where="[[_totalWhere(startDate, endDate)]]"
       current-page="{{_ignoredTotalPage}}"
       results-count="{{totalCount}}">
@@ -151,7 +151,7 @@ Two different mechanisms are used, each chosen for how it scales:
     <nuxeo-page-provider
       auto
       provider="default_search"
-      page-size="1"
+      page-size="0"
       where="[[_migratedWhere(startDate, endDate)]]"
       current-page="{{_ignoredMigratedPage}}"
       results-count="{{migratedCount}}">
@@ -161,7 +161,7 @@ Two different mechanisms are used, each chosen for how it scales:
          PER-MONTH MIGRATED COUNTS (exact, period-scoped, scale-safe).
 
          The period is at most 12 months, so we run one count query per
-         month. Each is page-size="1" reading results-count, so it returns a
+         month. Each is page-size="0" reading results-count, so it returns a
          single number and fetches no documents — cheap at any repository
          size. _months is rebuilt whenever the date range changes; each
          repeated provider writes its month's migrated count back through
@@ -170,24 +170,39 @@ Two different mechanisms are used, each chosen for how it scales:
          histogram (docsPerMonth), so non-migrated = all - migrated.
          ============================================================ -->
     <template is="dom-repeat" items="[[_months]]" as="m">
-      <!-- Migrated docs in this month -->
+      <!-- Migrated docs in this month (default_search + where) -->
       <nuxeo-page-provider
         auto
-        page-size="1"
-        query="[[_monthMigratedQuery(m)]]"
+        provider="default_search"
+        page-size="0"
+        where="[[_monthMigratedWhere(m)]]"
         current-page="{{_ignoredMonthPage}}"
         results-count="{{_noopA}}"
         on-results-count-changed="_onMigratedCount">
       </nuxeo-page-provider>
+      <!-- INLINE-NXQL fallback (flip back if default_search misbehaves):
+      <nuxeo-page-provider auto page-size="0"
+        query="[[_monthMigratedQuery(m)]]"
+        current-page="{{_ignoredMonthPage}}"
+        results-count="{{_noopA}}"
+        on-results-count-changed="_onMigratedCount"></nuxeo-page-provider> -->
+
       <!-- Total docs in this month (so non-migrated = total - migrated) -->
       <nuxeo-page-provider
         auto
-        page-size="1"
-        query="[[_monthTotalQuery(m)]]"
+        provider="default_search"
+        page-size="0"
+        where="[[_monthTotalWhere(m)]]"
         current-page="{{_ignoredMonthPage2}}"
         results-count="{{_noopB}}"
         on-results-count-changed="_onTotalCount">
       </nuxeo-page-provider>
+      <!-- INLINE-NXQL fallback:
+      <nuxeo-page-provider auto page-size="0"
+        query="[[_monthTotalQuery(m)]]"
+        current-page="{{_ignoredMonthPage2}}"
+        results-count="{{_noopB}}"
+        on-results-count-changed="_onTotalCount"></nuxeo-page-provider> -->
     </template>
 
     <!-- ============================================================
@@ -203,12 +218,19 @@ Two different mechanisms are used, each chosen for how it scales:
     <template is="dom-repeat" items="[[_useCaseTypes]]" as="uc">
       <nuxeo-page-provider
         auto
-        page-size="1"
-        query="[[_typeMigratedQuery(uc.type, startDate, endDate)]]"
+        provider="default_search"
+        page-size="0"
+        where="[[_typeMigratedWhere(uc.type, startDate, endDate)]]"
         current-page="{{_ignoredTypePage}}"
         results-count="{{uc.mig}}"
         on-results-count-changed="_onTypeMigratedCount">
       </nuxeo-page-provider>
+      <!-- INLINE-NXQL fallback:
+      <nuxeo-page-provider auto page-size="0"
+        query="[[_typeMigratedQuery(uc.type, startDate, endDate)]]"
+        current-page="{{_ignoredTypePage}}"
+        results-count="{{uc.mig}}"
+        on-results-count-changed="_onTypeMigratedCount"></nuxeo-page-provider> -->
     </template>
 
     <!-- ============================================================
@@ -678,7 +700,29 @@ Two different mechanisms are used, each chosen for how it scales:
         var range = this._dateRangeClause(startDate, endDate);
         if (!range) return '';
         return range.replace(/^AND\s+/, '') +
-               " AND fid_migration:migrationHistory/* IS NOT NULL";
+               " AND (fid_migration:migrationHistory/*/systemName IS NOT NULL OR fid_migration:migrationHistory/*/systemDocId IS NOT NULL OR fid_migration:migrationHistory/*/ingestionDate IS NOT NULL OR fid_migration:migrationHistory/*/comment IS NOT NULL)";
+      },
+
+      // Per-month WHERE fragments (default_search).
+      _monthMigratedWhere: function(m) {
+        if (!m || !m.start || !m.end) return '';
+        return "dc:created BETWEEN TIMESTAMP '" + m.start +
+               "' AND TIMESTAMP '" + m.end + "'" +
+               " AND (fid_migration:migrationHistory/*/systemName IS NOT NULL OR fid_migration:migrationHistory/*/systemDocId IS NOT NULL OR fid_migration:migrationHistory/*/ingestionDate IS NOT NULL OR fid_migration:migrationHistory/*/comment IS NOT NULL)";
+      },
+      _monthTotalWhere: function(m) {
+        if (!m || !m.start || !m.end) return '';
+        return "dc:created BETWEEN TIMESTAMP '" + m.start +
+               "' AND TIMESTAMP '" + m.end + "'";
+      },
+
+      // Per-type migrated WHERE fragment (default_search).
+      _typeMigratedWhere: function(t, startDate, endDate) {
+        var range = this._dateRangeClause(startDate, endDate);
+        if (!range || !t) return '';
+        return range.replace(/^AND\s+/, '') +
+               " AND ecm:primaryType = '" + t + "'" +
+               " AND (fid_migration:migrationHistory/*/systemName IS NOT NULL OR fid_migration:migrationHistory/*/systemDocId IS NOT NULL OR fid_migration:migrationHistory/*/ingestionDate IS NOT NULL OR fid_migration:migrationHistory/*/comment IS NOT NULL)";
       },
 
       // Same as above, plus the migrated predicate (migrationHistory non-empty)
@@ -687,7 +731,7 @@ Two different mechanisms are used, each chosen for how it scales:
         if (!range) return '';
         return "SELECT * FROM Document WHERE ecm:isVersion = 0 " +
                "AND ecm:isTrashed = 0 " + range +
-               " AND fid_migration:migrationHistory/* IS NOT NULL";
+               " AND (fid_migration:migrationHistory/*/systemName IS NOT NULL OR fid_migration:migrationHistory/*/systemDocId IS NOT NULL OR fid_migration:migrationHistory/*/ingestionDate IS NOT NULL OR fid_migration:migrationHistory/*/comment IS NOT NULL)";
       },
 
       // Shared date-range clause: dc:created between two TIMESTAMP literals.
@@ -791,7 +835,7 @@ Two different mechanisms are used, each chosen for how it scales:
                "AND ecm:isTrashed = 0 " +
                "AND dc:created BETWEEN TIMESTAMP '" + m.start +
                "' AND TIMESTAMP '" + m.end + "' " +
-               "AND fid_migration:migrationHistory/* IS NOT NULL";
+               "AND (fid_migration:migrationHistory/*/systemName IS NOT NULL OR fid_migration:migrationHistory/*/systemDocId IS NOT NULL OR fid_migration:migrationHistory/*/ingestionDate IS NOT NULL OR fid_migration:migrationHistory/*/comment IS NOT NULL)";
       },
 
       // NXQL for one month's TOTAL document count (same filters, no migration
@@ -1250,7 +1294,7 @@ Two different mechanisms are used, each chosen for how it scales:
         return "SELECT * FROM Document WHERE ecm:isVersion = 0 " +
                "AND ecm:isTrashed = 0 " + range +
                " AND ecm:primaryType = '" + t + "'" +
-               " AND fid_migration:migrationHistory/* IS NOT NULL";
+               " AND (fid_migration:migrationHistory/*/systemName IS NOT NULL OR fid_migration:migrationHistory/*/systemDocId IS NOT NULL OR fid_migration:migrationHistory/*/ingestionDate IS NOT NULL OR fid_migration:migrationHistory/*/comment IS NOT NULL)";
       },
 
       // A per-type migrated count arrived. Store it (default 0) and bump the
