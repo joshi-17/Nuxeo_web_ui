@@ -649,12 +649,16 @@ Two different mechanisms are used, each chosen for how it scales:
         }
       },
 
-      // ---- On-demand email report (Option 1: server builds HTML + CID images) ----
-      // Collects the current period's numbers and exports each chart to a PNG
-      // (labelled, so the server can caption them), then POSTs to the
-      // Fid_EmailUsageReport automation operation. The email send is server-side
-      // and needs SMTP configured on the Nuxeo instance.
+      // ---- On-demand email report (Option 1: no scripting operation) ----
+      // The scripting engine on this instance can't run (Nashorn "global is
+      // null"), so we do everything with the browser + the built-in
+      // Notification.SendMail operation, which is proven to work:
+      //   1. build the HTML email body here in the browser,
+      //   2. export each chart to a PNG blob and batch-upload them to Nuxeo,
+      //   3. call Notification.SendMail with the HTML + the uploaded chart
+      //      blobs as attachments, using the repository root as input.
       _emailReport: function() {
+        var self = this;
         var email = (this.emailRecipient || '').trim();
         if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
           this.emailStatus = 'Enter a valid email address.';
@@ -662,80 +666,139 @@ Two different mechanisms are used, each chosen for how it scales:
         }
         this.emailStatus = 'Preparing report…';
 
-        // Headline numbers for the current period.
+        // ----- numbers -----
         var total = this.totalCount || 0;
         var migrated = this.migratedCount || 0;
-        var summary = {
-          startDate: this.startDate || '',
-          endDate: this.endDate || '',
-          period: this.selectedPeriod || '',
-          totalDocuments: total,
-          storageBytes: this.totalStorageBytes || 0,
-          migrated: migrated,
-          nonMigrated: (total - migrated) > 0 ? (total - migrated) : 0,
-          migratedPct: total ? Math.round((migrated / total) * 100) : 0
-        };
+        var nonMig = (total - migrated) > 0 ? (total - migrated) : 0;
+        var pct = total ? Math.round((migrated / total) * 100) : 0;
 
-        // Export each chart to a PNG, keeping a human label with each so the
-        // server can caption them. We locate the <chart-*> elements and pull the
-        // <canvas> from inside (light DOM first, then shadow root).
+        function withCommas(n) { return ('' + (n || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
+        function fmtStorage(b) {
+          b = b || 0;
+          if (b >= 1073741824) return (Math.round(b / 107374182.4) / 10) + ' GB';
+          if (b >= 1048576)    return (Math.round(b / 104857.6) / 10) + ' MB';
+          if (b >= 1024)       return (Math.round(b / 102.4) / 10) + ' KB';
+          return b + ' B';
+        }
+
+        // ----- HTML body (built entirely in the browser) -----
+        var html = '<div style="font-family:Arial,sans-serif;color:#20302A;">'
+          + '<h2 style="color:#1E5631;margin:0 0 4px;">Nuxeo Usage Report</h2>'
+          + '<p style="color:#5A6560;margin:0 0 16px;">Period: ' + (this.startDate || '') + ' to ' + (this.endDate || '') + '</p>'
+          + '<table cellpadding="8" style="border-collapse:collapse;font-size:14px;">'
+          + '<tr><td style="border-bottom:1px solid #eee;"><b>New documents</b></td><td style="border-bottom:1px solid #eee;">' + withCommas(total) + '</td></tr>'
+          + '<tr><td style="border-bottom:1px solid #eee;"><b>Storage added</b></td><td style="border-bottom:1px solid #eee;">' + fmtStorage(this.totalStorageBytes) + '</td></tr>'
+          + '<tr><td style="border-bottom:1px solid #eee;"><b>Migrated</b></td><td style="border-bottom:1px solid #eee;">' + withCommas(migrated) + ' (' + pct + '%)</td></tr>'
+          + '<tr><td><b>Non-migrated</b></td><td>' + withCommas(nonMig) + '</td></tr>'
+          + '</table>'
+          + '<p style="color:#5A6560;font-size:12px;margin-top:16px;">Charts are attached to this email.</p>'
+          + '</div>';
+
+        // ----- collect chart canvases -----
         var chartEls = Polymer.dom(this.root).querySelectorAll('chart-bar, chart-pie, chart-line');
-        var charts = [];
+        var canvases = [];
         var seen = [];
-        Array.prototype.forEach.call(chartEls, function(el, idx) {
+        Array.prototype.forEach.call(chartEls, function(el) {
           var c = null;
           try {
             c = el.querySelector ? el.querySelector('canvas') : null;
             if (!c && el.shadowRoot) { c = el.shadowRoot.querySelector('canvas'); }
           } catch (e) { c = null; }
-          if (!c || seen.indexOf(c) !== -1) return;
-          seen.push(c);
-          // Derive a label from a nearby sub-title, else a generic name.
-          var label = 'Chart ' + (charts.length + 1);
-          try {
-            var box = el.closest ? el.closest('.chart-box, .card-inner, nuxeo-card') : null;
-            var t = box ? box.querySelector('.chart-sub-title, .card-title, h3, h4') : null;
-            if (t && t.textContent) { label = t.textContent.trim(); }
-          } catch (e) { /* keep generic label */ }
-          try {
-            charts.push({ label: label, image: c.toDataURL('image/png') });
-          } catch (e) { /* tainted/empty canvas — skip */ }
+          if (c && seen.indexOf(c) === -1) { seen.push(c); canvases.push(c); }
         });
 
-        // Automation operations take flat params; send the structured data as
-        // JSON strings so the server can parse them reliably regardless of the
-        // operation's parameter typing.
-        var params = {
-          recipient: email,
-          summaryJson: JSON.stringify(summary),
-          chartsJson: JSON.stringify(charts)
-        };
-
-        var self = this;
-        this.emailStatus = 'Sending…';
-        fetch('/nuxeo/api/v1/automation/javascript.Fid_EmailUsageReport', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json'
-          },
-          credentials: 'include',
-          body: JSON.stringify({ params: params })
-        }).then(function(resp) {
-          if (resp.ok) {
-            self.emailStatus = 'Report sent to ' + email;
-          } else {
-            resp.text().then(function(t) {
-              if (window && window.console) {
-                console.error('EmailUsageReport failed', resp.status, resp.statusText, t);
+        // Turn a canvas into a PNG Blob (Promise).
+        function canvasToBlob(canvas) {
+          return new Promise(function(resolve) {
+            try {
+              if (canvas.toBlob) {
+                canvas.toBlob(function(b) { resolve(b); }, 'image/png');
+              } else {
+                // fallback: data URL -> Blob
+                var dataUrl = canvas.toDataURL('image/png');
+                var parts = dataUrl.split(',');
+                var bin = atob(parts[1]);
+                var arr = new Uint8Array(bin.length);
+                for (var i = 0; i < bin.length; i++) { arr[i] = bin.charCodeAt(i); }
+                resolve(new Blob([arr], { type: 'image/png' }));
               }
+            } catch (e) { resolve(null); }
+          });
+        }
+
+        // ----- the send flow -----
+        this.emailStatus = 'Uploading charts…';
+
+        // 1. create a batch
+        fetch('/nuxeo/api/v1/upload/', { method: 'POST', credentials: 'include' })
+          .then(function(r) {
+            if (!r.ok) throw new Error('batch create failed ' + r.status);
+            return r.json();
+          })
+          .then(function(batch) {
+            var batchId = batch.batchId || batch['batchId'];
+            // 2. upload each chart blob to the batch
+            var uploads = canvases.map(function(canvas, idx) {
+              return canvasToBlob(canvas).then(function(blob) {
+                if (!blob) return null;
+                return fetch('/nuxeo/api/v1/upload/' + batchId + '/' + idx, {
+                  method: 'POST',
+                  credentials: 'include',
+                  headers: {
+                    'Content-Type': 'image/png',
+                    'X-Upload-Type': 'normal',
+                    'X-File-Name': 'chart' + idx + '.png'
+                  },
+                  body: blob
+                }).then(function(u) { return u.ok ? idx : null; });
+              });
             });
-            self.emailStatus = 'Send failed (' + resp.status + '). See console for detail.';
-          }
-        }).catch(function(err) {
-          if (window && window.console) { window.console.error('EmailUsageReport error', err); }
-          self.emailStatus = 'Could not reach the mail service.';
-        });
+            return Promise.all(uploads).then(function(results) {
+              var ok = results.filter(function(x) { return x !== null; });
+              return { batchId: batchId, count: ok.length };
+            });
+          })
+          .then(function(info) {
+            // 3. call the built-in Notification.SendMail with the HTML + the
+            //    uploaded chart blobs as attachments. "files" references the
+            //    batch blobs; input is the repository root document.
+            self.emailStatus = 'Sending…';
+            var fileRefs = [];
+            for (var i = 0; i < info.count; i++) {
+              fileRefs.push('batch:' + info.batchId + ':' + i);
+            }
+            var body = {
+              input: 'doc:/',
+              params: {
+                to: [email],
+                subject: 'Nuxeo Usage Report - ' + (self.startDate || '') + ' to ' + (self.endDate || ''),
+                message: html,
+                HTML: true,
+                rollbackOnError: false,
+                files: fileRefs
+              }
+            };
+            return fetch('/nuxeo/api/v1/automation/Notification.SendMail', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+              credentials: 'include',
+              body: JSON.stringify(body)
+            });
+          })
+          .then(function(resp) {
+            if (resp.ok || resp.status === 204) {
+              self.emailStatus = 'Report sent to ' + email;
+            } else {
+              resp.text().then(function(t) {
+                if (window && window.console) { console.error('SendMail failed', resp.status, t); }
+              });
+              self.emailStatus = 'Send failed (' + resp.status + '). See console.';
+            }
+          })
+          .catch(function(err) {
+            if (window && window.console) { console.error('Email report error', err); }
+            self.emailStatus = 'Send failed. See console for detail.';
+          });
       },
 
       // Date -> "YYYY-MM-DD"
