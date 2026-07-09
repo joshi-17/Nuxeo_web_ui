@@ -716,7 +716,9 @@ Two different mechanisms are used, each chosen for how it scales:
         fetch('/nuxeo/api/v1/automation/Fid_EmailUsageReport', {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/json',
+            // Nuxeo's automation endpoint expects this content-type; plain
+            // application/json can cause a 405 (content-negotiation mismatch).
+            'Content-Type': 'application/json+nxrequest',
             'Accept': 'application/json'
           },
           credentials: 'include',
@@ -725,9 +727,15 @@ Two different mechanisms are used, each chosen for how it scales:
           if (resp.ok) {
             self.emailStatus = 'Report sent to ' + email;
           } else {
-            self.emailStatus = 'Send failed (' + resp.status + '). Check the mail service.';
+            resp.text().then(function(t) {
+              if (window && window.console) {
+                console.error('EmailUsageReport failed', resp.status, resp.statusText, t);
+              }
+            });
+            self.emailStatus = 'Send failed (' + resp.status + '). See console for detail.';
           }
-        }).catch(function() {
+        }).catch(function(err) {
+          if (window && window.console) { window.console.error('EmailUsageReport error', err); }
           self.emailStatus = 'Could not reach the mail service.';
         });
       },
