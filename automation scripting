@@ -1,32 +1,16 @@
 function run(input, params) {
   var s = JSON.parse(params.summaryJson);
-  var charts = JSON.parse(params.chartsJson || "[]");
   var recipient = params.recipient;
 
-  function withCommas(n) { return ("" + n).replace(/\B(?=(\d{3})+(?!\d))/g, ","); }
+  function withCommas(n) {
+    return ("" + n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  }
   function fmtStorage(b) {
     b = b || 0;
-    if (b >= 1073741824) return (Math.round(b/107374182.4)/10) + " GB";
-    if (b >= 1048576)    return (Math.round(b/104857.6)/10) + " MB";
-    if (b >= 1024)       return (Math.round(b/102.4)/10) + " KB";
+    if (b >= 1073741824) return (Math.round(b / 107374182.4) / 10) + " GB";
+    if (b >= 1048576)    return (Math.round(b / 104857.6) / 10) + " MB";
+    if (b >= 1024)       return (Math.round(b / 102.4) / 10) + " KB";
     return b + " B";
-  }
-
-  // Nashorn-safe Java type resolution
-  var Base64 = Java.type("java.util.Base64");
-  var Blobs  = Java.type("org.nuxeo.ecm.core.api.Blobs");
-  var BlobList = Java.type("org.nuxeo.ecm.automation.core.util.BlobList");
-
-  var blobList = new BlobList();
-  for (var i = 0; i < charts.length; i++) {
-    var dataUrl = charts[i].image || "";
-    var comma = dataUrl.indexOf(",");
-    if (comma === -1) continue;
-    var raw = dataUrl.substring(comma + 1);
-    var bytes = Base64.getDecoder().decode(raw);
-    var blob = Blobs.createBlob(bytes, "image/png");
-    blob.setFilename("chart" + i + ".png");
-    blobList.add(blob);
   }
 
   var html = '<div style="font-family:Arial,sans-serif;color:#20302A;">'
@@ -37,21 +21,13 @@ function run(input, params) {
     + '<tr><td><b>Storage added</b></td><td>' + fmtStorage(s.storageBytes) + '</td></tr>'
     + '<tr><td><b>Migrated</b></td><td>' + withCommas(s.migrated) + ' (' + s.migratedPct + '%)</td></tr>'
     + '<tr><td><b>Non-migrated</b></td><td>' + withCommas(s.nonMigrated) + '</td></tr>'
-    + '</table>';
-  for (var j = 0; j < charts.length; j++) {
-    html += '<div style="margin-top:16px;">'
-      + '<div style="font-weight:bold;color:#1E5631;">' + charts[j].label + '</div>'
-      + '<img src="cid:chart' + j + '.png" style="max-width:620px;"/>'
-      + '</div>';
-  }
-  html += '</div>';
+    + '</table></div>';
 
-  Mail.SendMail(blobList, {
+  Mail.SendMail(input, {
     "to": recipient,
     "subject": "Nuxeo Usage Report - " + s.startDate + " to " + s.endDate,
     "message": html,
-    "HTML": true,
-    "files": "true"
+    "HTML": true
   });
 
   return input;
