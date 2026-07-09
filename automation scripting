@@ -1,108 +1,48 @@
 function run(input, params) {
-
   var s = JSON.parse(params.summaryJson);
+  var charts = JSON.parse(params.chartsJson || "[]");
   var recipient = params.recipient;
 
-  function withCommas(n) {
-    return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-  }
-  function fmtStorage(bytes) {
-    bytes = bytes || 0;
-    if (bytes >= 1073741824) return (Math.round(bytes / 107374182.4) / 10) + ' GB';
-    if (bytes >= 1048576)    return (Math.round(bytes / 104857.6) / 10) + ' MB';
-    if (bytes >= 1024)       return (Math.round(bytes / 102.4) / 10) + ' KB';
-    return bytes + ' B';
+  function withCommas(n) { return ("" + n).replace(/\B(?=(\d{3})+(?!\d))/g, ","); }
+  function fmtStorage(b) {
+    b = b || 0;
+    if (b >= 1073741824) return (Math.round(b/107374182.4)/10) + " GB";
+    if (b >= 1048576)    return (Math.round(b/104857.6)/10) + " MB";
+    if (b >= 1024)       return (Math.round(b/102.4)/10) + " KB";
+    return b + " B";
   }
 
-  var html = ''
-    + '<div style="font-family:Arial,sans-serif;color:#20302A;">'
-    +   '<h2 style="color:#1E5631;margin:0 0 4px;">Nuxeo Usage Report</h2>'
-    +   '<p style="color:#5A6560;margin:0 0 16px;">Period: '
-          + s.startDate + ' to ' + s.endDate + '</p>'
-    +   '<table cellpadding="8" style="border-collapse:collapse;font-size:14px;">'
-    +     '<tr><td style="border-bottom:1px solid #eee;"><b>New documents</b></td>'
-    +         '<td style="border-bottom:1px solid #eee;">' + withCommas(s.totalDocuments) + '</td></tr>'
-    +     '<tr><td style="border-bottom:1px solid #eee;"><b>Storage added</b></td>'
-    +         '<td style="border-bottom:1px solid #eee;">' + fmtStorage(s.storageBytes) + '</td></tr>'
-    +     '<tr><td style="border-bottom:1px solid #eee;"><b>Migrated</b></td>'
-    +         '<td style="border-bottom:1px solid #eee;">' + withCommas(s.migrated) + ' (' + s.migratedPct + '%)</td></tr>'
-    +     '<tr><td><b>Non-migrated</b></td>'
-    +         '<td>' + withCommas(s.nonMigrated) + '</td></tr>'
-    +   '</table>'
-    + '</div>';
+  // Nashorn-safe Java type resolution
+  var Base64 = Java.type("java.util.Base64");
+  var Blobs  = Java.type("org.nuxeo.ecm.core.api.Blobs");
+  var BlobList = Java.type("org.nuxeo.ecm.automation.core.util.BlobList");
 
-  Mail.SendMail(null, {
-    "to": recipient,
-    "subject": "Nuxeo Usage Report - " + s.startDate + " to " + s.endDate,
-    "message": html,
-    "HTML": true
-  });
-
-  return input;
-}
-
-
-
-
-
-stage 2
-
-
-function run(input, params) {
-
-  var s = JSON.parse(params.summaryJson);
-  var charts = JSON.parse(params.chartsJson || '[]');   // [{label, image(dataURL)}, ...]
-  var recipient = params.recipient;
-
-  function withCommas(n) {
-    return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-  }
-  function fmtStorage(bytes) {
-    bytes = bytes || 0;
-    if (bytes >= 1073741824) return (Math.round(bytes / 107374182.4) / 10) + ' GB';
-    if (bytes >= 1048576)    return (Math.round(bytes / 104857.6) / 10) + ' MB';
-    if (bytes >= 1024)       return (Math.round(bytes / 102.4) / 10) + ' KB';
-    return bytes + ' B';
-  }
-
-  // decode chart PNGs into blobs (CID attachments)
-  var Base64 = org.apache.commons.codec.binary.Base64;
-  var Blobs  = org.nuxeo.ecm.core.api.Blobs;
-  var blobList = new org.nuxeo.ecm.automation.core.util.BlobList();
-
+  var blobList = new BlobList();
   for (var i = 0; i < charts.length; i++) {
-    var dataUrl = charts[i].image || '';
-    var comma = dataUrl.indexOf(',');
+    var dataUrl = charts[i].image || "";
+    var comma = dataUrl.indexOf(",");
     if (comma === -1) continue;
     var raw = dataUrl.substring(comma + 1);
-    var bytes = Base64.decodeBase64(raw);
+    var bytes = Base64.getDecoder().decode(raw);
     var blob = Blobs.createBlob(bytes, "image/png");
     blob.setFilename("chart" + i + ".png");
     blobList.add(blob);
   }
 
-  var html = ''
-    + '<div style="font-family:Arial,sans-serif;color:#20302A;">'
-    +   '<h2 style="color:#1E5631;margin:0 0 4px;">Nuxeo Usage Report</h2>'
-    +   '<p style="color:#5A6560;margin:0 0 16px;">Period: '
-          + s.startDate + ' to ' + s.endDate + '</p>'
-    +   '<table cellpadding="8" style="border-collapse:collapse;font-size:14px;">'
-    +     '<tr><td style="border-bottom:1px solid #eee;"><b>New documents</b></td>'
-    +         '<td style="border-bottom:1px solid #eee;">' + withCommas(s.totalDocuments) + '</td></tr>'
-    +     '<tr><td style="border-bottom:1px solid #eee;"><b>Storage added</b></td>'
-    +         '<td style="border-bottom:1px solid #eee;">' + fmtStorage(s.storageBytes) + '</td></tr>'
-    +     '<tr><td style="border-bottom:1px solid #eee;"><b>Migrated</b></td>'
-    +         '<td style="border-bottom:1px solid #eee;">' + withCommas(s.migrated) + ' (' + s.migratedPct + '%)</td></tr>'
-    +     '<tr><td><b>Non-migrated</b></td>'
-    +         '<td>' + withCommas(s.nonMigrated) + '</td></tr>'
-    +   '</table>';
-
+  var html = '<div style="font-family:Arial,sans-serif;color:#20302A;">'
+    + '<h2 style="color:#1E5631;">Nuxeo Usage Report</h2>'
+    + '<p>Period: ' + s.startDate + ' to ' + s.endDate + '</p>'
+    + '<table cellpadding="8" style="border-collapse:collapse;font-size:14px;">'
+    + '<tr><td><b>New documents</b></td><td>' + withCommas(s.totalDocuments) + '</td></tr>'
+    + '<tr><td><b>Storage added</b></td><td>' + fmtStorage(s.storageBytes) + '</td></tr>'
+    + '<tr><td><b>Migrated</b></td><td>' + withCommas(s.migrated) + ' (' + s.migratedPct + '%)</td></tr>'
+    + '<tr><td><b>Non-migrated</b></td><td>' + withCommas(s.nonMigrated) + '</td></tr>'
+    + '</table>';
   for (var j = 0; j < charts.length; j++) {
-    html += '<div style="margin-top:18px;">'
-         +    '<div style="font-weight:bold;color:#1E5631;font-size:13px;margin-bottom:4px;">'
-         +        charts[j].label + '</div>'
-         +    '<img src="cid:chart' + j + '.png" style="max-width:620px;border:1px solid #eee;"/>'
-         +  '</div>';
+    html += '<div style="margin-top:16px;">'
+      + '<div style="font-weight:bold;color:#1E5631;">' + charts[j].label + '</div>'
+      + '<img src="cid:chart' + j + '.png" style="max-width:620px;"/>'
+      + '</div>';
   }
   html += '</div>';
 
