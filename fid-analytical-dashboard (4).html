@@ -707,98 +707,40 @@ Two different mechanisms are used, each chosen for how it scales:
           if (c && seen.indexOf(c) === -1) { seen.push(c); canvases.push(c); }
         });
 
-        // Turn a canvas into a PNG Blob (Promise).
-        function canvasToBlob(canvas) {
-          return new Promise(function(resolve) {
-            try {
-              if (canvas.toBlob) {
-                canvas.toBlob(function(b) { resolve(b); }, 'image/png');
-              } else {
-                // fallback: data URL -> Blob
-                var dataUrl = canvas.toDataURL('image/png');
-                var parts = dataUrl.split(',');
-                var bin = atob(parts[1]);
-                var arr = new Uint8Array(bin.length);
-                for (var i = 0; i < bin.length; i++) { arr[i] = bin.charCodeAt(i); }
-                resolve(new Blob([arr], { type: 'image/png' }));
-              }
-            } catch (e) { resolve(null); }
-          });
-        }
-
         // ----- the send flow -----
-        this.emailStatus = 'Uploading charts…';
-
-        // 1. create a batch
-        fetch('/nuxeo/api/v1/upload/', { method: 'POST', credentials: 'include' })
-          .then(function(r) {
-            if (!r.ok) throw new Error('batch create failed ' + r.status);
-            return r.json();
-          })
-          .then(function(batch) {
-            var batchId = batch.batchId || batch['batchId'];
-            // 2. upload each chart blob to the batch
-            var uploads = canvases.map(function(canvas, idx) {
-              return canvasToBlob(canvas).then(function(blob) {
-                if (!blob) return null;
-                return fetch('/nuxeo/api/v1/upload/' + batchId + '/' + idx, {
-                  method: 'POST',
-                  credentials: 'include',
-                  headers: {
-                    'Content-Type': 'image/png',
-                    'X-Upload-Type': 'normal',
-                    'X-File-Name': 'chart' + idx + '.png'
-                  },
-                  body: blob
-                }).then(function(u) { return u.ok ? idx : null; });
-              });
+        // Notification.SendMail attaches blobs by xpath on the input document,
+        // not freshly-uploaded batch blobs — so we send the numbers email
+        // (built here in the browser) via the built-in operation, which is
+        // proven to work. Charts are exported/attached separately.
+        this.emailStatus = 'Sending…';
+        var body = {
+          input: 'doc:/',
+          params: {
+            to: email,
+            subject: 'Nuxeo Usage Report - ' + (this.startDate || '') + ' to ' + (this.endDate || ''),
+            message: html,
+            HTML: true,
+            rollbackOnError: false
+          }
+        };
+        fetch('/nuxeo/api/v1/automation/Notification.SendMail', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify(body)
+        }).then(function(resp) {
+          if (resp.ok || resp.status === 204) {
+            self.emailStatus = 'Report sent to ' + email;
+          } else {
+            resp.text().then(function(t) {
+              if (window && window.console) { console.error('SendMail failed', resp.status, t); }
             });
-            return Promise.all(uploads).then(function(results) {
-              var ok = results.filter(function(x) { return x !== null; });
-              return { batchId: batchId, count: ok.length };
-            });
-          })
-          .then(function(info) {
-            // 3. call the built-in Notification.SendMail with the HTML + the
-            //    uploaded chart blobs as attachments. "files" references the
-            //    batch blobs; input is the repository root document.
-            self.emailStatus = 'Sending…';
-            var fileRefs = [];
-            for (var i = 0; i < info.count; i++) {
-              fileRefs.push('batch:' + info.batchId + ':' + i);
-            }
-            var body = {
-              input: 'doc:/',
-              params: {
-                to: [email],
-                subject: 'Nuxeo Usage Report - ' + (self.startDate || '') + ' to ' + (self.endDate || ''),
-                message: html,
-                HTML: true,
-                rollbackOnError: false,
-                files: fileRefs
-              }
-            };
-            return fetch('/nuxeo/api/v1/automation/Notification.SendMail', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-              credentials: 'include',
-              body: JSON.stringify(body)
-            });
-          })
-          .then(function(resp) {
-            if (resp.ok || resp.status === 204) {
-              self.emailStatus = 'Report sent to ' + email;
-            } else {
-              resp.text().then(function(t) {
-                if (window && window.console) { console.error('SendMail failed', resp.status, t); }
-              });
-              self.emailStatus = 'Send failed (' + resp.status + '). See console.';
-            }
-          })
-          .catch(function(err) {
-            if (window && window.console) { console.error('Email report error', err); }
-            self.emailStatus = 'Send failed. See console for detail.';
-          });
+            self.emailStatus = 'Send failed (' + resp.status + '). See console.';
+          }
+        }).catch(function(err) {
+          if (window && window.console) { console.error('Email report error', err); }
+          self.emailStatus = 'Send failed. See console for detail.';
+        });
       },
 
       // Date -> "YYYY-MM-DD"
