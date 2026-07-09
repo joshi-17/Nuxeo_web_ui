@@ -713,12 +713,10 @@ Two different mechanisms are used, each chosen for how it scales:
 
         var self = this;
         this.emailStatus = 'Sending…';
-        fetch('/nuxeo/api/v1/automation/Fid_EmailUsageReport', {
+        fetch('/nuxeo/api/v1/automation/javascript.Fid_EmailUsageReport', {
           method: 'POST',
           headers: {
-            // Nuxeo's automation endpoint expects this content-type; plain
-            // application/json can cause a 405 (content-negotiation mismatch).
-            'Content-Type': 'application/json+nxrequest',
+            'Content-Type': 'application/json',
             'Accept': 'application/json'
           },
           credentials: 'include',
@@ -1425,11 +1423,5 @@ Two different mechanisms are used, each chosen for how it scales:
 
     });
   </script>
-
-
-
-
-
-  {"params": {"recipient": "your-email@fidelity.com", "summaryJson": "{\"startDate\":\"2026-06-01\",\"endDate\":\"2026-06-30\",\"totalDocuments\":100,\"storageBytes\":1000,\"migrated\":50,\"nonMigrated\":50,\"migratedPct\":50}", "chartsJson": "[]"}}
 
 </dom-module>
