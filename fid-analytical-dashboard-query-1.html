@@ -1865,3 +1865,32 @@ Two different mechanisms are used, each chosen for how it scales:
   </script>
 
 </dom-module>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// Named parameters for the fid_TOTAL Studio provider.
+// Keys MUST match the Studio predicate parameter names exactly:
+//   dublincore_created   = start timestamp (>=)
+//   dublincore_created_1 = end timestamp   (<=)
+_totalParams: function(startDate, endDate) {
+  if (!startDate || !endDate) { return undefined; }
+  return {
+    dublincore_created:   this._toTimestamp(startDate, false),  // 'YYYY-MM-DD 00:00:00'
+    dublincore_created_1: this._toTimestamp(endDate, true)      // 'YYYY-MM-DD 23:59:59'
+  };
+},
