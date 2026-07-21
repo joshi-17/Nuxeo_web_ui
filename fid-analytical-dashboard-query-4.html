@@ -1,0 +1,2000 @@
+<!--
+`fid-analytical-dashboard`
+@group Nuxeo UI
+@element fid-analytical-dashboard
+
+Monthly usage / growth dashboard, designed for very large repositories
+(billion-document scale).
+
+PRODUCTION / SCALE NOTES (read before deploying):
+  1. EVERY query must hit Elasticsearch, never the SQL database. The
+     <nuxeo-repository-data> aggregations always use ES. The NXQL
+     <nuxeo-page-provider> COUNT queries only use ES if the server is
+     configured with (append to any existing list, keep default_search):
+         elasticsearch.override.pageproviders=default_search,REST_API_SEARCH_ADAPTER
+     in nuxeo.conf (restart required). REST_API_SEARCH_ADAPTER is the
+     provider behind ad-hoc NXQL on the REST search endpoint, which is what
+     this component's count queries use. WITHOUT this, counts fall back to
+     the database and a COUNT over a billion rows will time out.
+  2. Query budget per full page load (after optimisation): 7 ES
+     aggregations + 2 NXQL counts + <=12 monthly migrated counts +
+     <=10 per-type migrated counts. All page-size=1 / aggregation-only —
+     no document bodies are ever fetched.
+  3. Date changes are batched (setProperties) so each change fires each
+     query exactly once. Baseline queries re-fire only on Apply.
+
+Layout:
+  - Header card   : title + period selector (+ custom date range)
+  - KPI strip     : headline numbers for the selected period
+  - Slot 1 (hero) : Growth view with tabs
+                    Overall     -> documents line + storage bars (one chart)
+                    By Doc Type -> pie of documents per primary type
+                    By Format   -> pie of documents per mime-type
+                    By Size     -> storage added per month (bar, GB/MB auto)
+  - Slot 2        : Migration adoption donut (migrated vs non-migrated)
+  - Slots 3-6     : reserved (Coming soon)
+
+Shared CSS lives in fid-dashboard-styles.html and is imported below.
+
+=====================================================================
+SCALABILITY NOTES (billion-document design)
+=====================================================================
+Two different mechanisms are used, each chosen for how it scales:
+
+1. CHARTS (growth, storage, type/format breakdown) use nuxeo-repository-data
+   aggregations: grouped-by, with-date-intervals, sum(...). These are
+   Elasticsearch aggregations — ES computes them across the whole index and
+   returns only the buckets (a handful of rows), never the documents. This
+   scales to a billion docs by design.
+
+2. MIGRATION COUNTS use nuxeo-page-provider with NXQL and page-size="1",
+   reading ONLY resultsCount. This returns a single filtered count without
+   fetching documents, so it also scales. We deliberately do NOT count
+   migrated docs with a term aggregation (grouped-by on systemName): at scale
+   that would need one bucket per distinct source system and, capped by
+   group-limit, would silently undercount. A filtered resultsCount is exact
+   and scale-safe.
+
+   We avoid the `where` attribute on nuxeo-repository-data entirely: on this
+   build it crashes on ranges / LIKE / IS NOT NULL. NXQL inside a page
+   provider supports the complex-field IS NOT NULL predicate correctly and
+   fails gracefully instead of taking the page down.
+=====================================================================
+-->
+
+<!-- Import the shared style module so this file stays focused on markup + logic -->
+<link rel="import" href="fid-dashboard-styles.html">
+
+<dom-module id="fid-analytical-dashboard">
+  <template>
+    <!-- iron-flex gives flex helpers; fid-dashboard-styles holds our CSS -->
+    <style include="iron-flex iron-flex-alignment nuxeo-styles fid-dashboard-styles"></style>
+
+    <!-- ============================================================
+         CHART DATA — Elasticsearch aggregations (scale-safe).
+         Re-run automatically when startDate / endDate change.
+         ============================================================ -->
+
+    <!-- Documents created per month (Overall line) -->
+    <nuxeo-repository-data
+      start-date="[[startDate]]"
+      end-date="[[_extendEndDate(endDate)]]"
+      with-date-intervals="month"
+      date-field="dc:created"
+      data="{{docsPerMonth}}"
+      index="[[index]]">
+    </nuxeo-repository-data>
+
+    <!-- Storage added per month: sum of file sizes in bytes (Overall bars + By Size) -->
+    <nuxeo-repository-data
+      start-date="[[startDate]]"
+      end-date="[[_extendEndDate(endDate)]]"
+      with-date-intervals="month"
+      date-field="dc:created"
+      metrics="sum(file:content.length)"
+      data="{{storagePerMonth}}"
+      index="[[index]]">
+    </nuxeo-repository-data>
+
+    <!-- ===== SLOT 6: BASELINE (fully independent range) =====
+         These two feeds are deliberately bound to baselineStart/baselineEnd,
+         NOT to the page's period selector. The baseline card owns its own
+         month range: leadership picks a start month and an end month and
+         hits Apply. Changing the page period has no effect here, and vice
+         versa. Both dates are committed together in _applyBaseline via
+         setProperties, so these feeds re-fire exactly once per Apply. -->
+    <nuxeo-repository-data
+      start-date="[[baselineStart]]"
+      end-date="[[baselineEnd]]"
+      with-date-intervals="month"
+      date-field="dc:created"
+      data="{{baselineDocsPerMonth}}"
+      index="[[index]]">
+    </nuxeo-repository-data>
+
+    <nuxeo-repository-data
+      start-date="[[baselineStart]]"
+      end-date="[[baselineEnd]]"
+      with-date-intervals="month"
+      date-field="dc:created"
+      metrics="sum(file:content.length)"
+      data="{{baselineStoragePerMonth}}"
+      index="[[index]]">
+    </nuxeo-repository-data>
+
+    <!-- By Doc Type: documents grouped by primary type (pie + Slot 4) -->
+    <nuxeo-repository-data
+      start-date="[[startDate]]"
+      end-date="[[_extendEndDate(endDate)]]"
+      grouped-by="ecm:primaryType"
+      group-limit="10"
+      data="{{byDocType}}"
+      index="[[index]]">
+    </nuxeo-repository-data>
+
+    <!-- Storage by Doc Type: sum of file sizes grouped by primary type (Slot 5) -->
+    <nuxeo-repository-data
+      start-date="[[startDate]]"
+      end-date="[[_extendEndDate(endDate)]]"
+      grouped-by="ecm:primaryType"
+      group-limit="10"
+      metrics="sum(file:content.length)"
+      data="{{storageByDocType}}"
+      index="[[index]]">
+    </nuxeo-repository-data>
+
+    <!-- By Format: documents grouped by mime-type (pie) -->
+    <nuxeo-repository-data
+      start-date="[[startDate]]"
+      end-date="[[_extendEndDate(endDate)]]"
+      grouped-by="file:content.mime-type"
+      group-limit="10"
+      data="{{byFormat}}"
+      index="[[index]]">
+    </nuxeo-repository-data>
+
+    <!-- ============================================================
+         COUNTS — NXQL page providers, resultsCount only (scale-safe).
+
+         page-size="1" + reading resultsCount means ES returns the match
+         count without fetching documents. Dates are injected as query
+         parameters so the counts respect the selected period.
+         ============================================================ -->
+
+    <!-- Total documents in the period.
+         The full NXQL is built by _totalQuery with the dates already inlined —
+         no ? placeholders, so there is nothing for the page provider to
+         substitute (placeholders were reaching the server unsubstituted and
+         causing a lexical error). The query is empty until both dates exist,
+         and `auto` simply does not fire on an empty query. -->
+    <!-- Total documents in the period — Studio provider fid_TOTAL (Elasticsearch).
+         Named params: dublincore_created = start, dublincore_created_1 = end. -->
+    <nuxeo-page-provider
+      auto
+      page-size="1"
+      provider="fid_TOTAL"
+      named-query-params="[[_totalParams(startDate, endDate)]]"
+      current-page="{{_ignoredTotalPage}}"
+      results-count="{{totalCount}}">
+    </nuxeo-page-provider>
+
+    <!-- Migrated documents in the period — Studio provider fid_MIGRATED (Elasticsearch).
+         Named params: dublincore_created = start, dublincore_created_1 = end. -->
+    <nuxeo-page-provider
+      auto
+      page-size="1"
+      provider="fid_MIGRATED"
+      named-query-params="[[_migratedParams(startDate, endDate)]]"
+      current-page="{{_ignoredMigratedPage}}"
+      results-count="{{migratedCount}}">
+    </nuxeo-page-provider>
+
+    <!-- ============================================================
+         PER-MONTH MIGRATED COUNTS (exact, period-scoped, scale-safe).
+
+         PERF: one count query per month for MIGRATED only (<=12). The
+         per-month TOTALS are NOT queried — they are derived from the
+         docsPerMonth date histogram already fetched above (reconciled to
+         the authoritative NXQL totalCount), eliminating 12 count queries
+         per load. non-migrated = total - migrated.
+         ============================================================ -->
+    <template is="dom-repeat" items="[[_months]]" as="m">
+      <nuxeo-page-provider
+        auto
+        page-size="1"
+        provider="fid_MIGRATED"
+        named-query-params="[[_monthMigratedParams(m)]]"
+        current-page="{{_ignoredMonthPage}}"
+        results-count="{{_noopA}}"
+        on-results-count-changed="_onMigratedCount">
+      </nuxeo-page-provider>
+    </template>
+
+    <!-- ============================================================
+         PER-USE-CASE MIGRATED COUNT (Slots 4 & 5).
+
+         Total docs per type come from the byDocType aggregation (already
+         fetched). Here we only need the MIGRATED count per type. Each provider
+         writes into its own item field (uc.mig) so the change event always
+         fires, even when several types share the same count. Migrated defaults
+         to 0, so every row always shows a real percentage (0% when none).
+         Bounded (<=10 types) and scale-safe.
+
+         NOTE ON PROVIDER: these queries filter by ecm:primaryType, which the
+         fid_MIGRATED Studio provider has no parameter for. Converting them
+         would need a third provider (fid_MIGRATED_BY_TYPE). They remain ad-hoc
+         NXQL for now and rely on the elasticsearch.override.pageproviders
+         nuxeo.conf entry (REST_API_SEARCH_ADAPTER) to run on Elasticsearch —
+         same as before this change. Bounded and page-size=1, so cheap either
+         way. Convert to a named provider as a follow-up if full coverage is
+         required.
+         ============================================================ -->
+    <template is="dom-repeat" items="[[_useCaseTypes]]" as="uc">
+      <nuxeo-page-provider
+        auto
+        page-size="1"
+        query="[[_typeMigratedQuery(uc.type, startDate, endDate)]]"
+        current-page="{{_ignoredTypePage}}"
+        results-count="{{uc.mig}}"
+        on-results-count-changed="_onTypeMigratedCount">
+      </nuxeo-page-provider>
+    </template>
+
+    <!-- ============================================================
+         PAGE
+         ============================================================ -->
+    <div class="page">
+      <div class="content">
+        <nuxeo-page>
+
+          <!-- Nuxeo admin top bar -->
+          <div slot="header">
+            <span class="flex">Analytical Dashboard</span>
+          </div>
+
+          <div class="dashboard-container">
+
+            <!-- ---------- HEADER CARD: title + period selector ---------- -->
+            <nuxeo-card class="dates">
+              <div class="header-slot">
+
+                <div class="header-left">
+                  <h1>Analytical Dashboard</h1>
+                  <p>Nuxeo usage tracking dashboard</p>
+                </div>
+
+                <div class="header-divider"></div>
+
+                <div class="header-controls">
+                  <div class="period-block">
+                    <div class="period-row">
+                      <nuxeo-select
+                        label="Period"
+                        selected="{{selectedPeriod}}"
+                        options='["1month","3months","6months","9months","1year","custom"]'
+                        on-selected-changed="_onPeriodChanged">
+                      </nuxeo-select>
+                      <div class="period-info-wrap">
+                        <iron-icon class="period-info-icon" icon="icons:info-outline"></iron-icon>
+                        <div class="period-tooltip">
+                          The period is calculated from today's date and looks back over the number of months you select. For example, choosing 6 months shows activity from the last six months up to today. Use "custom" to pick an exact start and end date.
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Custom date pickers appear only for the custom option -->
+                  <template is="dom-if" if="[[_isCustom(selectedPeriod)]]">
+                    <div class="custom-dates">
+                      <div class="date-field">
+                        <label>Start Date</label>
+                        <input type="date" value="{{customStart::change}}" />
+                      </div>
+                      <div class="date-field">
+                        <label>End Date</label>
+                        <input type="date" value="{{customEnd::change}}" />
+                      </div>
+                      <div class="date-field">
+                        <label>&nbsp;</label>
+                        <button type="button" class="custom-submit" on-tap="_applyCustomDates">Apply</button>
+                      </div>
+                    </div>
+                  </template>
+
+                  <!-- ON-DEMAND EMAIL REPORT -->
+                  <div class="email-report-row">
+                    <span class="email-report-label">
+                      <svg viewBox="0 0 24 24"><path d="M20 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/></svg>
+                      Email this report
+                    </span>
+                    <button type="button" class="email-btn" on-tap="_emailReport">
+                      <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+                      Send report
+                    </button>
+                    <span class="email-status">[[emailStatus]]</span>
+                  </div>
+                </div>
+
+              </div>
+            </nuxeo-card>
+
+            <!-- ---------- KPI STRIP: headline numbers ---------- -->
+            <div class="flex-layout tight">
+              <nuxeo-card class="full-width">
+                <div class="kpi-strip">
+
+                  <div class="kpi-cell">
+                    <span class="kpi-value">[[_formatCount(totalCount)]]</span>
+                    <span class="kpi-label">New documents created</span>
+                  </div>
+
+                  <div class="kpi-cell">
+                    <span class="kpi-value">[[_formatStorage(totalStorageBytes)]]</span>
+                    <span class="kpi-label">of storage added</span>
+                  </div>
+
+                  <div class="kpi-cell">
+                    <span class="kpi-value">[[_formatCount(migratedCount)]]</span>
+                    <span class="kpi-label">From migrated use cases</span>
+                  </div>
+
+                  <div class="kpi-cell">
+                    <span class="kpi-value">[[_formatNonMigrated(totalCount, migratedCount)]]</span>
+                    <span class="kpi-label">From non-migrated use cases</span>
+                  </div>
+
+                </div>
+              </nuxeo-card>
+            </div>
+
+            <!-- ---------- CARD GRID ---------- -->
+            <div class="flex-layout">
+
+              <!-- ===== SLOT 1 (hero): Growth view with tabs ===== -->
+              <nuxeo-card class="full-width" heading="Growth Overview">
+
+                <!-- Tab toolbar: clicking sets activeView -->
+                <div class="view-tabs">
+                  <span class$="[[_tabClass(activeView, 'overall')]]" on-tap="_selectOverall">Overall</span>
+                  <span class$="[[_tabClass(activeView, 'docType')]]" on-tap="_selectDocType">By Doc Type</span>
+                  <span class$="[[_tabClass(activeView, 'format')]]"  on-tap="_selectFormat">By Format</span>
+                  <span class$="[[_tabClass(activeView, 'size')]]"    on-tap="_selectSize">By Size</span>
+                </div>
+
+                <!-- OVERALL: storage bars + documents line on one chart -->
+                <template is="dom-if" if="[[_isView(activeView, 'overall')]]">
+                  <div class="chart-sub-title">Documents and storage added per month</div>
+                  <div class="chart-box">
+                    <chart-bar
+                      labels="[[_monthLabels(storagePerMonth)]]"
+                      values="[[_overallValues(storagePerMonth, docsPerMonth, totalCount)]]"
+                      series="[[_overallSeries(storagePerMonth)]]"
+                      options="[[_overallOptions(storagePerMonth)]]">
+                    </chart-bar>
+                  </div>
+                </template>
+
+                <!-- BY DOC TYPE: pie of documents per primary type -->
+                <template is="dom-if" if="[[_isView(activeView, 'docType')]]">
+                  <div class="chart-sub-title">Documents by type</div>
+                  <template is="dom-if" if="[[!_isEmpty(byDocType)]]">
+                    <div class="chart-box">
+                      <chart-pie
+                        labels="[[_labels(byDocType)]]"
+                        values="[[_values(byDocType)]]"
+                        options='{"responsive":true,"maintainAspectRatio":false,"legend":{"display":true,"position":"right","labels":{"boxWidth":12,"fontSize":11,"padding":10}},"animation":false,"tooltips":{"enabled":true}}'>
+                      </chart-pie>
+                    </div>
+                  </template>
+                  <template is="dom-if" if="[[_isEmpty(byDocType)]]">
+                    <div class="chart-empty">No documents found in this period</div>
+                  </template>
+                </template>
+
+                <!-- BY FORMAT: pie of documents per mime-type -->
+                <template is="dom-if" if="[[_isView(activeView, 'format')]]">
+                  <div class="chart-sub-title">Documents by format</div>
+                  <template is="dom-if" if="[[!_isEmpty(byFormat)]]">
+                    <div class="chart-box">
+                      <chart-pie
+                        labels="[[_typeLabels(byFormat)]]"
+                        values="[[_values(byFormat)]]"
+                        options='{"responsive":true,"maintainAspectRatio":false,"legend":{"display":true,"position":"right","labels":{"boxWidth":12,"fontSize":11,"padding":10}},"animation":false,"tooltips":{"enabled":true}}'>
+                      </chart-pie>
+                    </div>
+                  </template>
+                  <template is="dom-if" if="[[_isEmpty(byFormat)]]">
+                    <div class="chart-empty">No files found in this period</div>
+                  </template>
+                </template>
+
+                <!-- BY SIZE: storage added per month (bar, unit auto-scaled) -->
+                <template is="dom-if" if="[[_isView(activeView, 'size')]]">
+                  <div class="chart-sub-title">Storage added per month</div>
+                  <div class="chart-box">
+                    <chart-bar
+                      labels="[[_monthLabels(storagePerMonth)]]"
+                      values="[[_storageValues(storagePerMonth)]]"
+                      series="[[_storageSeries(storagePerMonth)]]"
+                      options='{"responsive":true,"maintainAspectRatio":false,"legend":{"display":true,"position":"top","labels":{"boxWidth":10,"fontSize":11,"padding":12}},"animation":false,"scales":{"xAxes":[{"gridLines":{"display":false,"drawBorder":false},"ticks":{"autoSkip":false,"maxRotation":30,"fontSize":11,"fontColor":"#9e9e9e"}}],"yAxes":[{"gridLines":{"color":"rgba(0,0,0,0.04)","drawBorder":false},"ticks":{"beginAtZero":true,"fontSize":11,"fontColor":"#9e9e9e"}}]},"tooltips":{"mode":"index","intersect":false}}'>
+                    </chart-bar>
+                  </div>
+                </template>
+
+              </nuxeo-card>
+            </div>
+
+            <!-- ---------- ROW: Migration Adoption (1/3) + Monthly Migration (2/3) ---------- -->
+            <div class="flex-layout">
+
+              <!-- ===== SLOT 2: Migration adoption donut ===== -->
+              <nuxeo-card class="card-onethird" heading="Migration Adoption">
+                <div class="donut-wrap">
+                  <chart-pie
+                    labels="[[_migrationLabels()]]"
+                    values="[[_migrationValues(totalCount, migratedCount)]]"
+                    colors='["#2e7d32","#d32f2f"]'
+                    options='{"responsive":true,"maintainAspectRatio":false,"cutoutPercentage":68,"legend":{"display":true,"position":"bottom","labels":{"boxWidth":12,"fontSize":11,"padding":12}},"animation":false,"tooltips":{"enabled":true}}'>
+                  </chart-pie>
+                  <div class="donut-center">
+                    <span class="pct">[[_migratedPct(totalCount, migratedCount)]]%</span>
+                    <span class="pct-label">MIGRATED</span>
+                  </div>
+                </div>
+                <div class="migration-summary">
+                  <div class="stat">
+                    <span class="num">[[_withCommas(migratedCount)]]</span>
+                    <span class="lbl">Migrated</span>
+                  </div>
+                  <div class="stat">
+                    <span class="num">[[_nonMigratedCommas(totalCount, migratedCount)]]</span>
+                    <span class="lbl">Non-Migrated</span>
+                  </div>
+                  <div class="stat">
+                    <span class="num">[[_withCommas(totalCount)]]</span>
+                    <span class="lbl">Total</span>
+                  </div>
+                </div>
+              </nuxeo-card>
+
+              <!-- ===== SLOT 3 ===== -->
+              <!-- ===== Monthly Migrated vs Non-Migrated (full-width) ===== -->
+              <nuxeo-card class="card-twothirds" heading="Monthly Migration">
+                <div class="chart-sub-title">Migrated vs non-migrated documents per month</div>
+                <template is="dom-if" if="[[!_monthlyEmpty(monthlyMigrated)]]">
+                  <div class="chart-box">
+                    <chart-bar
+                      labels="[[_monthlyLabels(monthlyMigrated)]]"
+                      values="[[_monthlyValues(monthlyMigrated)]]"
+                      series="[[_monthlySeries()]]"
+                      colors="[[_monthlyColors()]]"
+                      options='{"responsive":true,"maintainAspectRatio":false,"legend":{"display":true,"position":"top","labels":{"boxWidth":10,"fontSize":11,"padding":12}},"animation":false,"scales":{"xAxes":[{"gridLines":{"display":false,"drawBorder":false},"ticks":{"autoSkip":false,"maxRotation":30,"fontSize":11,"fontColor":"#9e9e9e"}}],"yAxes":[{"gridLines":{"color":"rgba(0,0,0,0.04)","drawBorder":false},"ticks":{"beginAtZero":true,"fontSize":11,"fontColor":"#9e9e9e"}}]},"tooltips":{"mode":"index","intersect":false}}'>
+                    </chart-bar>
+                  </div>
+                </template>
+                <template is="dom-if" if="[[_monthlyEmpty(monthlyMigrated)]]">
+                  <div class="chart-empty">No documents found in this period</div>
+                </template>
+              </nuxeo-card>
+            </div>
+
+            <!-- ---------- ROW: Top 5 Use Cases (50/50) ---------- -->
+            <div class="flex-layout">
+
+              <!-- ===== SLOT 4: Top 5 Use Cases by document count ===== -->
+              <nuxeo-card class="card-half" heading="Top 5 Use Cases">
+                <div class="usecase-subhead">by document volume</div>
+                <template is="dom-if" if="[[!_isEmpty(topByDocs)]]">
+                  <div class="usecase-list">
+                    <div class="usecase-head-row">
+                      <span class="uc-rank-h">#</span>
+                      <span class="uc-name-h">USE CASE</span>
+                      <span class="uc-val-h">DOCS</span>
+                      <span class="uc-status-h">MIGRATED %</span>
+                    </div>
+                    <template is="dom-repeat" items="[[topByDocs]]" as="row">
+                      <div class="usecase-row">
+                        <span class="uc-rank">[[_inc(index)]]</span>
+                        <div class="uc-main">
+                          <span class="uc-name">[[row.label]]</span>
+                          <div class="uc-bar"><div class="uc-bar-fill" style$="[[_barStyle(row.value, topByDocsMax)]]"></div></div>
+                        </div>
+                        <span class="uc-val">[[_formatCount(row.value)]]</span>
+                        <span class="uc-status">[[_statusPct(row.type, _docCountByType, _statusVersion)]]</span>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+                <template is="dom-if" if="[[_isEmpty(topByDocs)]]">
+                  <div class="chart-empty">No documents found in this period</div>
+                </template>
+              </nuxeo-card>
+
+              <!-- ===== SLOT 5: Top 5 Use Cases by storage ===== -->
+              <nuxeo-card class="card-half" heading="Top 5 Use Cases">
+                <div class="usecase-subhead">by storage added</div>
+                <template is="dom-if" if="[[!_isEmpty(topByStorage)]]">
+                  <div class="usecase-list">
+                    <div class="usecase-head-row">
+                      <span class="uc-rank-h">#</span>
+                      <span class="uc-name-h">USE CASE</span>
+                      <span class="uc-val-h">STORAGE</span>
+                      <span class="uc-status-h">MIGRATED %</span>
+                    </div>
+                    <template is="dom-repeat" items="[[topByStorage]]" as="row">
+                      <div class="usecase-row">
+                        <span class="uc-rank">[[_inc(index)]]</span>
+                        <div class="uc-main">
+                          <span class="uc-name">[[row.label]]</span>
+                          <div class="uc-bar"><div class="uc-bar-fill" style$="[[_barStyle(row.value, topByStorageMax)]]"></div></div>
+                        </div>
+                        <span class="uc-val">[[_formatStorage(row.value)]]</span>
+                        <span class="uc-status">[[_statusPct(row.type, _docCountByType, _statusVersion)]]</span>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+                <template is="dom-if" if="[[_isEmpty(topByStorage)]]">
+                  <div class="chart-empty">No documents found in this period</div>
+                </template>
+              </nuxeo-card>
+            </div>
+
+            <!-- ---------- ROW: Growth vs July 2026 Baseline ---------- -->
+            <div class="flex-layout">
+
+              <nuxeo-card class="full-width" heading="Growth vs Baseline">
+                <div class="chart-sub-title">
+                  [[_baselineSubtitle(baselineLabel, baselineEndLabel)]]
+                </div>
+
+                <!-- Leadership-selectable baseline month. Scale-safe: the
+                     baseline queries only re-fire on "Apply", never on every
+                     keystroke, so rapidly changing the month does not trigger
+                     a burst of Elasticsearch aggregations. -->
+                <div class="baseline-picker">
+                  <div class="date-field">
+                    <label>Baseline month</label>
+                    <!-- No max: the full range is selectable, past or future.
+                         Leadership picks whatever they want; a range with no
+                         data yet is explained by the status line, not blocked. -->
+                    <input type="month" value="{{baselinePick::change}}" />
+                  </div>
+                  <div class="date-field">
+                    <label>Up to</label>
+                    <input type="month" value="{{baselineEndPick::change}}" />
+                  </div>
+                  <div class="date-field">
+                    <label>&nbsp;</label>
+                    <button type="button" class="custom-submit"
+                            on-tap="_applyBaseline">Apply</button>
+                  </div>
+                  <span class="baseline-picker-status">[[baselinePickStatus]]</span>
+                </div>
+
+                <div class="chart-box">
+                  <chart-bar
+                    labels="[[_monthLabels(baselineStoragePerMonth)]]"
+                    values="[[_baselineValues(baselineStoragePerMonth, baselineDocsPerMonth)]]"
+                    series="[[_baselineSeries(baselineStoragePerMonth)]]"
+                    options="[[_overallOptions(baselineStoragePerMonth)]]">
+                  </chart-bar>
+                </div>
+
+                <!-- % change vs the July 2026 baseline, month by month -->
+                <template is="dom-if" if="[[_hasBaseline(_baselineGrowth)]]">
+                  <div class="baseline-table-wrap">
+                    <div class="chart-sub-title">Change vs [[baselineLabel]]</div>
+                    <table class="baseline-table">
+                      <thead>
+                        <tr>
+                          <th>Month</th>
+                          <th>Documents</th>
+                          <th>vs [[_baselineShort(baselineLabel)]]</th>
+                          <th>Storage</th>
+                          <th>vs [[_baselineShort(baselineLabel)]]</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <template is="dom-repeat" items="[[_baselineGrowth]]">
+                          <tr>
+                            <td>[[item.month]]</td>
+                            <td class="num-cell">[[item.docs]]</td>
+                            <td class$="[[_deltaClass(item.docsPct)]]">[[item.docsPct]]</td>
+                            <td class="num-cell">[[item.storage]]</td>
+                            <td class$="[[_deltaClass(item.storagePct)]]">[[item.storagePct]]</td>
+                          </tr>
+                        </template>
+                      </tbody>
+                    </table>
+                  </div>
+                </template>
+              </nuxeo-card>
+
+            </div>
+
+          </div>
+
+        </nuxeo-page>
+      </div>
+    </div>
+
+  </template>
+
+  <script>
+    Polymer({
+      is: 'fid-analytical-dashboard',
+      behaviors: [Nuxeo.LayoutBehavior],
+
+      observers: [
+        '_buildMonths(startDate, endDate)',
+        '_applyMonthTotals(docsPerMonth, totalCount)',
+        '_computeTopByDocs(byDocType)',
+        '_computeTopByStorage(storageByDocType)'
+      ],
+
+      properties: {
+
+        // ---- Period selection ----
+        selectedPeriod: { type: String, value: '1month', observer: '_onPeriodChanged' },
+        startDate:      { type: String, notify: true },
+        endDate:        { type: String, notify: true },
+        customStart:    { type: String },
+        customEnd:      { type: String },
+
+        // ---- On-demand email report ----
+        emailStatus:    { type: String, value: '' },
+
+        // ---- Which hero tab is active: overall | docType | format | size ----
+        activeView:     { type: String, value: 'overall' },
+
+        // ---- Elasticsearch index ----
+        index:          { type: String, value: 'nuxeo' },
+
+        // ---- Chart aggregations ----
+        docsPerMonth:      { type: Array,  value: function() { return []; } },
+        storagePerMonth:   { type: Array,  value: function() { return []; } },
+
+        // ---- Slot 6: leadership-selectable baseline (independent range) ----
+        // The baseline card owns its OWN date range, separate from the page
+        // period selector. baselineStart/baselineEnd drive the queries and are
+        // only updated on Apply. baselinePick/baselineEndPick are the raw
+        // <input type="month"> values ('YYYY-MM'). baselineLabel /
+        // baselineEndLabel are the human labels used in headings.
+        baselineStart:            { type: String, value: '2026-07-01' },
+        baselineEnd:              { type: String, value: '2026-07-31' },
+        baselinePick:             { type: String, value: '2026-07' },
+        baselineEndPick:          { type: String, value: '2026-07' },
+        baselineLabel:            { type: String, value: 'July 2026' },
+        baselineEndLabel:         { type: String, value: 'July 2026' },
+        baselinePickStatus:       { type: String, value: '' },
+        baselineDocsPerMonth:     { type: Array,  value: function() { return []; } },
+        baselineStoragePerMonth:  { type: Array,  value: function() { return []; } },
+        // Per-month figures with % change vs the July baseline.
+        _baselineGrowth: {
+          type: Array,
+          value: function() { return []; },
+          computed: '_computeBaselineGrowth(baselineStoragePerMonth, baselineDocsPerMonth)'
+        },
+        byDocType:         { type: Array,  value: function() { return []; } },
+        storageByDocType:  { type: Array,  value: function() { return []; } },
+        byFormat:          { type: Array,  value: function() { return []; } },
+        // PERF: computed by summing the storagePerMonth histogram (same range)
+        // instead of a dedicated sum aggregation — one fewer ES hit per load.
+        totalStorageBytes: { type: Number, computed: '_sumBuckets(storagePerMonth)' },
+
+        // ---- Top 5 use cases (Slots 4 & 5) ----
+        // topByDocs / topByStorage: [{type, label, value}] top-5 lists.
+        // *Max: the largest value in each list (for the progress bar width).
+        // _docCountByType: {primaryType -> total doc count} from byDocType.
+        // _useCaseTypes: [{type, mig}] distinct types across both lists; each
+        //   provider writes its migrated count into its own item field (mig).
+        // _typeMigrated: {primaryType -> migrated count}, defaults missing to 0.
+        // _statusVersion: bumped when a migrated count arrives, so the pct
+        //   helpers recompute.
+        topByDocs:         { type: Array,  value: function() { return []; } },
+        topByStorage:      { type: Array,  value: function() { return []; } },
+        topByDocsMax:      { type: Number, value: 0 },
+        topByStorageMax:   { type: Number, value: 0 },
+        _docCountByType:   { type: Object, value: function() { return {}; } },
+        _useCaseTypes:     { type: Array,  value: function() { return []; } },
+        _typeMigrated:     { type: Object, value: function() { return {}; } },
+        _statusVersion:    { type: Number, value: 0 },
+
+        // ---- Migration counts (page-provider resultsCount) ----
+        totalCount:        { type: Number, value: 0 },
+        migratedCount:     { type: Number, value: 0 },
+
+        // ---- Per-month migrated counts ----
+        // _months: one entry per month in the period, each carrying its
+        //   own date bounds, label, and live migrated count.
+        // monthlyMigrated: the assembled [{key,label,migrated,all}] the
+        //   monthly chart reads, rebuilt as month counts arrive.
+        _months:           { type: Array, value: function() { return []; } },
+        monthlyMigrated:   { type: Array, value: function() { return []; } },
+
+        // current-page targets are required by nuxeo-page-provider but unused;
+        // we only read results-count (the total match count)
+        _ignoredTotalPage:    { type: Array },
+        _ignoredMigratedPage: { type: Array },
+        _ignoredMonthPage:    { type: Array },
+        _ignoredTypePage:     { type: Array },
+        _noopA:               { type: Number },
+
+      },
+
+      // Compute the initial date range once the element is ready
+      ready: function() {
+        this._computeDates(this.selectedPeriod);
+        // Default the baseline range end to the current month so the first
+        // render covers baseline -> today. The user can change it and Apply.
+        var nowMonth = this._toISODate(new Date()).substring(0, 7);
+        this.setProperties({
+          baselineEndPick:  nowMonth,
+          baselineEnd:      this._monthEndDate(nowMonth),
+          baselineEndLabel: this._monthYearLabel(nowMonth)
+        });
+      },
+
+      /* ==========================================================
+         PERIOD LOGIC
+         ========================================================== */
+
+      _isCustom: function(period) {
+        return period === 'custom';
+      },
+
+      // Fires when the dropdown changes
+      _onPeriodChanged: function(newVal) {
+        if (!newVal || newVal === 'custom') return;
+        this._computeDates(newVal);
+      },
+
+      // Turn a period option into start/end dates (today minus N months .. today)
+      _computeDates: function(period) {
+        var monthMap = {
+          '1month': 1, '3months': 3, '6months': 6, '9months': 9, '1year': 12
+        };
+        var months = monthMap[period];
+        if (!months) return;
+
+        var end   = new Date();
+        var start = new Date();
+        start.setMonth(start.getMonth() - months);
+
+        // PERF: setProperties batches both changes into one notification
+        // cycle. Setting them one-by-one made every date-bound query element
+        // fire TWICE per period change (once per property) — doubling all
+        // Elasticsearch traffic. This halves query volume on every change.
+        this.setProperties({
+          startDate: this._toISODate(start),
+          endDate:   this._toISODate(end)
+        });
+      },
+
+      // Applies the custom range only when the Apply button is clicked; needs
+      // both ends filled. Same assignment as before, just triggered on click.
+      _applyCustomDates: function() {
+        if (this.customStart && this.customEnd) {
+          // PERF: batched — see _computeDates.
+          this.setProperties({ startDate: this.customStart, endDate: this.customEnd });
+        }
+      },
+
+      // ================= LEADERSHIP BASELINE PICKER =================
+      // The user picks a month/year; on Apply, the baseline recalculates from
+      // the 1st of that month to today. Scale-safe: queries fire ONLY here,
+      // not on every picker change.
+      _applyBaseline: function() {
+        var pick    = (this.baselinePick || '').trim();      // 'YYYY-MM'
+        var endPick = (this.baselineEndPick || '').trim();   // 'YYYY-MM'
+        var MONTH = /^\d{4}-\d{2}$/;
+
+        if (!MONTH.test(pick)) {
+          this.baselinePickStatus = 'Pick a baseline month first.';
+          return;
+        }
+        if (!MONTH.test(endPick)) {
+          this.baselinePickStatus = 'Pick an end month first.';
+          return;
+        }
+        // String compare works on 'YYYY-MM' (zero-padded, fixed width).
+        if (endPick < pick) {
+          this.baselinePickStatus = 'End month cannot be before the baseline month.';
+          return;
+        }
+
+        // Commit start AND end together in ONE notification cycle. This is the
+        // only place the baseline query dates change, so the two Elasticsearch
+        // feeds re-fire exactly once per Apply — not once per date.
+        this.setProperties({
+          baselineStart:    pick + '-01',
+          baselineEnd:      this._monthEndDate(endPick),
+          baselineLabel:    this._monthYearLabel(pick),
+          baselineEndLabel: this._monthYearLabel(endPick)
+        });
+        this.baselinePickStatus = '';
+      },
+
+      // 'YYYY-MM' -> last calendar day of that month as 'YYYY-MM-DD'.
+      // Day 0 of the following month is the last day of this one, so this
+      // handles 28/29/30/31 and leap years without a lookup table.
+      _monthEndDate: function(pick) {
+        if (!/^\d{4}-\d{2}$/.test(pick || '')) return '';
+        var parts = pick.split('-');
+        var last = new Date(parseInt(parts[0], 10), parseInt(parts[1], 10), 0);
+        return this._toISODate(last);
+      },
+
+      // 'YYYY-MM' -> 'July 2026'
+      _monthYearLabel: function(pick) {
+        if (!/^\d{4}-\d{2}$/.test(pick || '')) return '';
+        var names = ['January','February','March','April','May','June',
+                     'July','August','September','October','November','December'];
+        var parts = pick.split('-');
+        var mi = parseInt(parts[1], 10) - 1;
+        if (mi < 0 || mi > 11) return '';
+        return names[mi] + ' ' + parts[0];
+      },
+
+      // sub-title text under the chart heading
+      _baselineSubtitle: function(label, endLabel) {
+        var from = label || 'selected';
+        if (endLabel && endLabel !== from) {
+          return 'Documents and storage added per month, ' + from + ' to ' + endLabel
+               + ' (baseline: ' + from + ')';
+        }
+        return 'Documents and storage added per month, starting from the '
+             + from + ' baseline';
+      },
+
+      // short label for the table headers ('vs Jul', 'vs Mar' ...)
+      _baselineShort: function(label) {
+        if (!label) return 'base';
+        return label.substring(0, 3);   // 'July 2026' -> 'Jul'
+      },
+
+      _emailReport: function() {
+        var self = this;
+        var email = 'Shreyas.BJoshi@fmr.com';      // recipient
+        var FROM  = 'noreply@fmr.com';             // must match your mail.from
+
+        this.emailStatus = 'Preparing report…';
+
+        // ---------- numbers ----------
+        var total    = this.totalCount || 0;
+        var migrated = this.migratedCount || 0;
+        var nonMig   = (total - migrated) > 0 ? (total - migrated) : 0;
+        var pct      = total ? Math.round((migrated / total) * 100) : 0;
+
+        // PERF/DRY: reuse the component's own formatters instead of local
+        // duplicates — one implementation to maintain, and _formatStorage
+        // also handles TB/PB which the old local copy did not.
+        var withCommas = this._withCommas.bind(this);
+        var fmtStorage = this._formatStorage.bind(this);
+
+        // ---------- email body ----------
+        var html = '<div style="font-family:Arial,sans-serif;color:#20302A;">'
+          + '<h2 style="color:#1E5631;margin:0 0 4px;">Nuxeo Usage Report</h2>'
+          + '<p style="color:#5A6560;margin:0 0 16px;">Period: ' + (this.startDate || '') + ' to ' + (this.endDate || '') + '</p>'
+          + '<table cellpadding="8" style="border-collapse:collapse;font-size:14px;">'
+          + '<tr><td style="border-bottom:1px solid #eee;"><b>Total documents added</b></td><td style="border-bottom:1px solid #eee;">' + withCommas(total) + '</td></tr>'
+          + '<tr><td style="border-bottom:1px solid #eee;"><b>Total storage added</b></td><td style="border-bottom:1px solid #eee;">' + fmtStorage(this.totalStorageBytes) + '</td></tr>'
+          + '<tr><td style="border-bottom:1px solid #eee;"><b>Migrated</b></td><td style="border-bottom:1px solid #eee;">' + withCommas(migrated) + ' (' + pct + '%)</td></tr>'
+          + '<tr><td><b>Non-migrated</b></td><td>' + withCommas(nonMig) + ' (' + (100 - pct) + '%)</td></tr>'
+          + '</table>';
+
+        // Top 5 by documents
+        var top = this.topByDocs || [];
+        if (top.length) {
+          html += '<h3 style="color:#1E5631;margin:20px 0 6px;">Top 5 Use Cases (by document volume)</h3>'
+            + '<table cellpadding="8" style="border-collapse:collapse;font-size:13px;">'
+            + '<tr style="background:#F3F9F3;"><th align="left">#</th><th align="left">Use case</th>'
+            + '<th align="right">Documents</th><th align="right">Migrated %</th></tr>';
+          for (var i = 0; i < top.length && i < 5; i++) {
+            var r = top[i], mp = '-';
+            try { mp = this._statusPct(r.type, this._docCountByType, this._statusVersion) || '-'; } catch (e) {}
+            html += '<tr><td>' + (i + 1) + '</td><td>' + (r.label || r.type || '') + '</td>'
+                 + '<td align="right">' + withCommas(r.value) + '</td><td align="right">' + mp + '</td></tr>';
+          }
+          html += '</table>';
+        }
+
+        // Top 5 by storage
+        var topS = this.topByStorage || [];
+        if (topS.length) {
+          html += '<h3 style="color:#1E5631;margin:20px 0 6px;">Top 5 Use Cases (by storage added)</h3>'
+            + '<table cellpadding="8" style="border-collapse:collapse;font-size:13px;">'
+            + '<tr style="background:#F3F9F3;"><th align="left">#</th><th align="left">Use case</th>'
+            + '<th align="right">Storage</th><th align="right">Migrated %</th></tr>';
+          for (var k = 0; k < topS.length && k < 5; k++) {
+            var rs = topS[k], sp = '-';
+            try { sp = this._statusPct(rs.type, this._docCountByType, this._statusVersion) || '-'; } catch (e) {}
+            html += '<tr><td>' + (k + 1) + '</td><td>' + (rs.label || rs.type || '') + '</td>'
+                 + '<td align="right">' + fmtStorage(rs.value) + '</td><td align="right">' + sp + '</td></tr>';
+          }
+          html += '</table>';
+        }
+
+        // Growth vs the selected baseline
+        var bg = this._baselineGrowth || [];
+        if (bg.length) {
+          var blabel = this.baselineLabel || 'baseline';
+          var bshort = this._baselineShort(this.baselineLabel);
+          html += '<h3 style="color:#1E5631;margin:20px 0 6px;">Growth vs ' + blabel + ' (Baseline)</h3>'
+            + '<table cellpadding="8" style="border-collapse:collapse;font-size:13px;">'
+            + '<tr style="background:#F3F9F3;"><th align="left">Month</th><th align="right">Documents</th>'
+            + '<th align="right">vs ' + bshort + '</th><th align="right">Storage</th><th align="right">vs ' + bshort + '</th></tr>';
+          bg.forEach(function(row) {
+            html += '<tr><td>' + row.month + '</td><td align="right">' + row.docs + '</td>'
+                 + '<td align="right">' + row.docsPct + '</td><td align="right">' + row.storage + '</td>'
+                 + '<td align="right">' + row.storagePct + '</td></tr>';
+          });
+          html += '</table>';
+        }
+
+        html += '<p style="color:#5A6560;font-size:12px;margin-top:18px;">A PDF with the charts is attached.</p></div>';
+
+        // ---------- SendMail (matches the call proven to work in Bruno) ----------
+        function sendMail(tempDoc) {
+          self.emailStatus = 'Sending…';
+          var params = {
+            from: FROM,
+            to: email,
+            subject: 'Nuxeo Usage Report - ' + (self.startDate || '') + ' to ' + (self.endDate || ''),
+            message: html,
+            HTML: true,
+            rollbackOnError: false
+          };
+          var body = { input: 'doc:/', params: params };
+          if (tempDoc && tempDoc.uid) {
+            body.input = 'doc:' + tempDoc.uid;   // the doc holding the PDF
+            params.files = 'file:content';        // attach its blob
+          }
+          return fetch('/nuxeo/api/v1/automation/Notification.SendMail', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify(body)
+          }).then(function(resp) {
+            if (resp.ok || resp.status === 204) {
+              self.emailStatus = 'Report sent';
+            } else {
+              return resp.text().then(function(t) {
+                if (window.console) { console.error('SendMail failed', resp.status, t); }
+                self.emailStatus = 'Could not send. Please try again.';
+              });
+            }
+          });
+        }
+
+        // ---------- build a COMPACT PDF ----------
+        try { this.activeView = 'overall'; } catch (e) {}
+
+        this._ensurePdfLibs().then(function() {
+          // let the Overall chart redraw after switching views
+          return new Promise(function(res) { setTimeout(res, 500); });
+        }).then(function() {
+          var root = self.shadowRoot || self;
+
+          // Export a card's <canvas> natively as a PNG.
+          // Native export never hangs (unlike html2canvas), and PNG compresses
+          // flat-colour chart canvases very small (~15 KB each).
+          function shot(heading) {
+            var cards = root.querySelectorAll('nuxeo-card');
+            for (var i = 0; i < cards.length; i++) {
+              var h = cards[i].getAttribute && cards[i].getAttribute('heading');
+              if (h !== heading) continue;
+              var c = cards[i].querySelector('canvas');
+              if (!c && cards[i].shadowRoot) { c = cards[i].shadowRoot.querySelector('canvas'); }
+              if (!c) {
+                var ce = cards[i].querySelector('chart-bar, chart-pie, chart-line');
+                if (ce) {
+                  c = ce.querySelector ? ce.querySelector('canvas') : null;
+                  if (!c && ce.shadowRoot) { c = ce.shadowRoot.querySelector('canvas'); }
+                }
+              }
+              if (c && c.width && c.height) {
+                try {
+                  // Flatten onto white (the canvas may be transparent), then
+                  // export as PNG. PNG is used deliberately: for flat-colour
+                  // chart canvases it compresses far SMALLER than JPEG
+                  // (~14 KB vs ~80 KB each). The old 5.4 MB PDF came from
+                  // html2canvas screenshotting whole cards at 2x, not from PNG.
+                  var tmp = document.createElement('canvas');
+                  tmp.width = c.width; tmp.height = c.height;
+                  var ctx = tmp.getContext('2d');
+                  ctx.fillStyle = '#ffffff';
+                  ctx.fillRect(0, 0, tmp.width, tmp.height);
+                  ctx.drawImage(c, 0, 0);
+                  return { img: tmp.toDataURL('image/png'), w: c.width, h: c.height };
+                } catch (e) { return null; }
+              }
+            }
+            return null;
+          }
+
+          self.emailStatus = 'Building PDF…';
+
+          var pages = [
+            { title: 'Growth Overview', sub: 'Documents and storage added per month',
+              chart: shot('Growth Overview'),
+              stats: [['Total documents added', withCommas(total)],
+                      ['Total storage added', fmtStorage(self.totalStorageBytes)]] },
+            { title: 'Migration Adoption', sub: 'Migrated vs non-migrated',
+              chart: shot('Migration Adoption'),
+              donutCenter: { pct: pct + '%', label: 'MIGRATED' },
+              stats: [['Migrated', withCommas(migrated) + '   (' + pct + '%)'],
+                      ['Non-migrated', withCommas(nonMig) + '   (' + (100 - pct) + '%)'],
+                      ['Total', withCommas(total)]] },
+            { title: 'Monthly Migration', sub: 'Migrated vs non-migrated documents per month',
+              chart: shot('Monthly Migration'),
+              stats: [['Migrated', withCommas(migrated)],
+                      ['Non-migrated', withCommas(nonMig)],
+                      ['Adoption', pct + '%']] },
+            { title: 'Growth vs ' + (self.baselineLabel || 'Baseline'),
+              sub: 'Documents and storage added per month from the ' + (self.baselineLabel || 'selected') + ' baseline',
+              chart: shot('Growth vs Baseline'),
+              stats: (self._baselineGrowth || []).slice(0, 8).map(function(row) {
+                return [row.month, row.docs + ' docs  (' + row.docsPct + ')   ·   ' + row.storage + '  (' + row.storagePct + ')'];
+              }) }
+          ];
+
+          var pdf = new window.jspdf.jsPDF({ orientation: 'p', unit: 'pt', format: 'a4', compress: true });
+          var pw = pdf.internal.pageSize.getWidth();
+          var ph = pdf.internal.pageSize.getHeight();
+          var M = 40;
+
+          // Cover
+          pdf.setFillColor(30, 86, 49); pdf.rect(0, 0, pw, 96, 'F');
+          pdf.setTextColor(255, 255, 255); pdf.setFontSize(21);
+          pdf.text('Nuxeo Usage Report', M, 46);
+          pdf.setFontSize(11); pdf.setTextColor(200, 230, 201);
+          pdf.text('Period: ' + (self.startDate || '') + ' to ' + (self.endDate || ''), M, 70);
+          pdf.setTextColor(30, 86, 49); pdf.setFontSize(14);
+          pdf.text('Summary', M, 140);
+          pdf.setDrawColor(220, 232, 220); pdf.line(M, 148, pw - M, 148);
+          pdf.setFontSize(11);
+          var y = 174;
+          [['Total documents added', withCommas(total)],
+           ['Total storage added', fmtStorage(self.totalStorageBytes)],
+           ['Migrated', withCommas(migrated) + '   (' + pct + '%)'],
+           ['Non-migrated', withCommas(nonMig) + '   (' + (100 - pct) + '%)']
+          ].forEach(function(row) {
+            pdf.setTextColor(90, 101, 96); pdf.text(row[0], M + 6, y);
+            pdf.setTextColor(32, 48, 42); pdf.text(String(row[1]), M + 250, y);
+            y += 24;
+          });
+
+          // one page per chart: image + its numbers as text
+          var added = 0;
+          pages.forEach(function(pg) {
+            if (!pg.chart) return;
+            pdf.addPage(); added++;
+            pdf.setTextColor(30, 86, 49); pdf.setFontSize(15);
+            pdf.text(pg.title, M, 52);
+            pdf.setTextColor(120, 130, 124); pdf.setFontSize(9.5);
+            pdf.text(pg.sub, M, 70);
+
+            var maxW = pw - M * 2;
+            var maxH = ph - 300;
+            var r = Math.min(maxW / pg.chart.w, maxH / pg.chart.h);
+            var w = pg.chart.w * r, h = pg.chart.h * r;
+            var imgX = (pw - w) / 2;
+            pdf.addImage(pg.chart.img, 'PNG', imgX, 88, w, h);
+
+            // The donut's centre text ("33% / MIGRATED") is an HTML overlay,
+            // not part of the canvas — so the exported ring has an empty hole.
+            // Draw that text into the centre of the image here.
+            if (pg.donutCenter) {
+              var cx = imgX + w / 2;
+              var cy = 88 + h / 2;
+              pdf.setFontSize(20); pdf.setTextColor(32, 48, 42);
+              pdf.text(pg.donutCenter.pct, cx, cy, { align: 'center' });
+              pdf.setFontSize(8); pdf.setTextColor(140, 148, 143);
+              pdf.text(pg.donutCenter.label, cx, cy + 14, { align: 'center' });
+            }
+
+            var ty = 88 + h + 34;
+            pdf.setDrawColor(220, 232, 220); pdf.line(M, ty - 20, pw - M, ty - 20);
+            pdf.setFontSize(10.5);
+            pg.stats.forEach(function(st) {
+              if (ty > ph - 40) return;                 // don't overflow the page
+              pdf.setTextColor(90, 101, 96); pdf.text(String(st[0]), M + 6, ty);
+              pdf.setTextColor(32, 48, 42); pdf.text(String(st[1]), M + 190, ty);
+              ty += 19;
+            });
+          });
+
+          if (!added) { throw new Error('no charts could be exported'); }
+
+          var pdfBlob = pdf.output('blob');
+          var sizeKB = Math.round(pdfBlob.size / 1024);
+          if (window.console) { console.log('Report PDF size: ' + sizeKB + ' KB'); }
+          // A huge attachment is what stopped the mail going out before. If it
+          // is still too big, send the figures email rather than fail silently.
+          if (sizeKB > 4000) { throw new Error('PDF too large to email (' + sizeKB + ' KB)'); }
+
+          // ---------- upload + temp doc ----------
+          self.emailStatus = 'Attaching charts…';
+          return fetch('/nuxeo/api/v1/upload/', { method: 'POST', credentials: 'include' })
+            .then(function(r) { if (!r.ok) throw new Error('batch create ' + r.status); return r.json(); })
+            .then(function(batch) {
+              var batchId = batch.batchId;
+              return fetch('/nuxeo/api/v1/upload/' + batchId + '/0', {
+                method: 'POST', credentials: 'include',
+                headers: { 'Content-Type': 'application/pdf', 'X-Upload-Type': 'normal', 'X-File-Name': 'usage-report.pdf' },
+                body: pdfBlob
+              }).then(function(u) { if (!u.ok) throw new Error('upload ' + u.status); return batchId; });
+            })
+            .then(function(batchId) {
+              self.emailStatus = 'Preparing attachment…';
+              var createBody = {
+                input: 'doc:/',
+                params: {
+                  type: 'File',
+                  name: 'usage-report-' + Date.now(),
+                  properties: 'dc:title=Usage Report\nfile:content=' + JSON.stringify({ 'upload-batch': batchId, 'upload-fileId': '0' })
+                }
+              };
+              return fetch('/nuxeo/api/v1/automation/Document.Create', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify(createBody)
+              }).then(function(r) {
+                if (!r.ok) throw new Error('Document.Create ' + r.status);
+                return r.json();
+              });
+            });
+        }).then(function(tempDoc) {
+          return sendMail(tempDoc);          // email WITH the PDF attached
+        }).catch(function(err) {
+          // Anything in the PDF path failed — still send the figures email so
+          // the report always goes out.
+          if (window.console) { console.error('PDF step failed, sending figures only:', err); }
+          self.emailStatus = 'Sending…';
+          return sendMail(null);
+        });
+      },
+
+      // Load jsPDF only. html2canvas is deliberately NOT used (it hangs on
+      // Chart.js canvases and froze the page).
+      _ensurePdfLibs: function() {
+        if (window.jspdf) { return Promise.resolve(); }
+        return new Promise(function(res, rej) {
+          var s = document.createElement('script');
+          s.src = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js';
+          s.onload = res; s.onerror = rej;
+          document.head.appendChild(s);
+        });
+      },
+
+      // Date -> "YYYY-MM-DD"
+      _toISODate: function(date) {
+        return date.toISOString().split('T')[0];
+      },
+
+      // Push the end date to the end of that day so ES includes today's docs
+      _extendEndDate: function(date) {
+        if (!date) return date;
+        var d = new Date(date);
+        d.setDate(d.getDate() + 1);
+        d.setMilliseconds(d.getMilliseconds() - 1);
+        return d.toISOString().split('T')[0];
+      },
+
+      // Build the full NXQL for the total-documents count, dates inlined as
+      // TIMESTAMP literals. Returns '' until both dates exist so the page
+      // provider's `auto` does not fire on an empty/partial query.
+      _totalQuery: function(startDate, endDate) {
+        var range = this._dateRangeClause(startDate, endDate);
+        if (!range) return '';
+        return "SELECT * FROM Document WHERE ecm:isVersion = 0 " +
+               "AND ecm:isTrashed = 0 " + range;
+      },
+
+      // Same as above, plus the migrated predicate (migrationHistory non-empty)
+      _migratedQuery: function(startDate, endDate) {
+        var range = this._dateRangeClause(startDate, endDate);
+        if (!range) return '';
+        return "SELECT * FROM Document WHERE ecm:isVersion = 0 " +
+               "AND ecm:isTrashed = 0 " + range +
+               " AND fid_migration:migrationHistory/*/systemName IS NOT NULL";
+      },
+
+      // Shared date-range clause: dc:created between two TIMESTAMP literals.
+      // NXQL matches date fields against full timestamps, so we format both
+      // ends as 'YYYY-MM-DD HH:MM:SS' rather than bare dates.
+      _dateRangeClause: function(startDate, endDate) {
+        if (!startDate || !endDate) return '';
+        var start = this._toTimestamp(startDate, false);
+        var end   = this._toTimestamp(endDate, true);
+        return "AND dc:created BETWEEN TIMESTAMP '" + start +
+               "' AND TIMESTAMP '" + end + "'";
+      },
+
+      // "YYYY-MM-DD" -> "YYYY-MM-DD 00:00:00" (start) or
+      //                 "YYYY-MM-DD 23:59:59" (end, inclusive of the whole day)
+      _toTimestamp: function(date, isEnd) {
+        if (!date) return date;
+        var day = String(date).split('T')[0];
+        return day + (isEnd ? ' 23:59:59' : ' 00:00:00');
+      },
+
+      // ============================================================
+      // NAMED PARAMETERS for the Studio page providers fid_TOTAL and
+      // fid_MIGRATED (both Elasticsearch-backed).
+      //
+      // The Studio predicate parameter names are:
+      //   dublincore_created    = start timestamp  (dc:created >= ...)
+      //   dublincore_created_1  = end timestamp    (dc:created <= ...)
+      //
+      // Returning `undefined` while dates are missing keeps the provider
+      // from firing on an incomplete range (mirrors the old empty-query guard).
+      // ============================================================
+      _totalParams: function(startDate, endDate) {
+        if (!startDate || !endDate) { return undefined; }
+        return {
+          dublincore_created:   this._toTimestamp(startDate, false),
+          dublincore_created_1: this._toTimestamp(endDate, true)
+        };
+      },
+
+      _migratedParams: function(startDate, endDate) {
+        if (!startDate || !endDate) { return undefined; }
+        return {
+          dublincore_created:   this._toTimestamp(startDate, false),
+          dublincore_created_1: this._toTimestamp(endDate, true)
+        };
+      },
+
+      // Per-month migrated count via fid_MIGRATED. m.start / m.end are already
+      // formatted 'YYYY-MM-DD HH:MM:SS' timestamps built in _buildMonths, so
+      // they map straight onto the named parameters.
+      _monthMigratedParams: function(m) {
+        if (!m || !m.start || !m.end) { return undefined; }
+        return {
+          dublincore_created:   m.start,
+          dublincore_created_1: m.end
+        };
+      },
+
+      /* ==========================================================
+         PER-MONTH MIGRATION BUCKETS
+
+         _buildMonths runs whenever the date range changes. It splits the
+         selected period into calendar months and creates one descriptor per
+         month: { key, label, start, end, migrated, all }. Each descriptor
+         feeds one page-provider (via dom-repeat) that fills `migrated`
+         exactly for that month. `all` is filled from the dc:created
+         histogram. The monthly chart reads monthlyMigrated, assembled by
+         the count handlers / _refreshMonthly.
+         ========================================================== */
+
+      // Rebuild the month descriptors for the current [startDate, endDate].
+      _buildMonths: function(startDate, endDate) {
+        if (!startDate || !endDate) { this._months = []; return; }
+
+        // Parse "YYYY-MM-DD" into a LOCAL date (new Date("YYYY-MM-DD") parses as
+        // UTC, which shifts the month by one in timezones behind UTC and made
+        // the chart drop the last month / start a month early).
+        var start = this._parseLocal(startDate);
+        var end   = this._parseLocal(endDate);
+        var months = [];
+
+        // Walk month by month from the start month to the end month.
+        var cursor = new Date(start.getFullYear(), start.getMonth(), 1);
+        var last   = new Date(end.getFullYear(), end.getMonth(), 1);
+
+        while (cursor <= last) {
+          var y = cursor.getFullYear();
+          var mo = cursor.getMonth();                 // 0-based
+          var firstOfMonth = new Date(y, mo, 1);
+          var lastOfMonth  = new Date(y, mo + 1, 0);  // day 0 of next month = last day
+
+          // Clamp to the actual selected range at the edges.
+          var mStart = firstOfMonth < start ? start : firstOfMonth;
+          var mEnd   = lastOfMonth  > end   ? end   : lastOfMonth;
+
+          months.push({
+            key:      this._toISOLocal(firstOfMonth),       // e.g. 2026-03-01
+            label:    this._toMonthYear(this._toISOLocal(firstOfMonth)),
+            start:    this._toTimestamp(this._toISOLocal(mStart), false),
+            end:      this._toTimestamp(this._toISOLocal(mEnd), true),
+            migrated: 0,
+            all:      0
+          });
+
+          cursor.setMonth(cursor.getMonth() + 1);
+        }
+
+        this._months = months;
+        this._refreshMonthly();
+      },
+
+      // Parse "YYYY-MM-DD" (or an ISO datetime) into a LOCAL-time Date, so month
+      // boundaries match the user's calendar rather than UTC.
+      _parseLocal: function(dateStr) {
+        var datePart = String(dateStr).split('T')[0];
+        var p = datePart.split('-');
+        var y = parseInt(p[0], 10);
+        var mo = parseInt(p[1], 10) - 1;
+        var d = parseInt(p[2], 10);
+        return new Date(y, mo, d);
+      },
+
+      // Format a Date as "YYYY-MM-DD" using its LOCAL parts (not UTC), so the
+      // month keys/labels/timestamps match the calendar the user sees.
+      _toISOLocal: function(date) {
+        var y = date.getFullYear();
+        var mo = String(date.getMonth() + 1);
+        var d = String(date.getDate());
+        if (mo.length < 2) mo = '0' + mo;
+        if (d.length < 2) d = '0' + d;
+        return y + '-' + mo + '-' + d;
+      },
+
+      // NXQL for one month's migrated count (dates already inlined).
+      _monthMigratedQuery: function(m) {
+        if (!m || !m.start || !m.end) return '';
+        return "SELECT * FROM Document WHERE ecm:isVersion = 0 " +
+               "AND ecm:isTrashed = 0 " +
+               "AND dc:created BETWEEN TIMESTAMP '" + m.start +
+               "' AND TIMESTAMP '" + m.end + "' " +
+               "AND fid_migration:migrationHistory/*/systemName IS NOT NULL";
+      },
+
+      // NXQL for one month's TOTAL document count (same filters, no migration
+      // predicate). Used so non-migrated = total - migrated comes purely from
+      // queries, with no dependence on aggregation histogram key formats.
+
+      // Per-month providers report their count via the change EVENT, and we
+      // write it onto the correct month with e.model.set(...) — the
+      // notification-aware path. A plain {{m.all}} two-way binding inside
+      // dom-repeat mutates the item object WITHOUT notifying Polymer, so the
+      // _months.* observer never fires and the chart stays stale. Reading the
+      // value from e.detail.value and writing via e.model.set fixes that.
+
+      _onMigratedCount: function(e) {
+        if (!e || !e.model || !e.detail) return;
+        var val = e.detail.value;
+        if (typeof val !== 'number') return;
+        e.model.set('m.migrated', val);
+        this._refreshMonthly();
+      },
+
+
+      // Normalise any histogram bucket key (epoch ms, 'YYYY-MM',
+      // 'YYYY-MM-DD', ISO datetime) to 'YYYY-MM' for month matching.
+      _monthKey: function(key) {
+        var str = String(key);
+        if (/^\d{10,}$/.test(str)) {
+          var d = new Date(parseInt(str, 10));
+          if (!isNaN(d.getTime())) {
+            return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2);
+          }
+        }
+        return str.split('T')[0].substring(0, 7);
+      },
+
+      // PERF: per-month TOTALS come from the docsPerMonth histogram (already
+      // fetched) instead of 12 extra count queries. Aligned to _months by
+      // normalised month key, then reconciled so the months sum to the
+      // authoritative NXQL totalCount (same technique as the Overall chart).
+      _applyMonthTotals: function(docsPerMonth, totalCount) {
+        var months = this._months || [];
+        if (!months.length || !docsPerMonth || !docsPerMonth.length) return;
+        var self = this;
+        var histo = {};
+        docsPerMonth.forEach(function(b) { histo[self._monthKey(b.key)] = b.value || 0; });
+        var raw = months.map(function(m) { return histo[self._monthKey(m.key)] || 0; });
+        var totals = this._reconcileDocs(raw, totalCount);
+        months.forEach(function(m, i) { m.all = totals[i] || 0; });
+        this._refreshMonthly();
+      },
+
+      // Assemble monthlyMigrated straight from the per-month query results.
+      // Each month descriptor carries its own `migrated` and `all` counts.
+      // Non-migrated = all - migrated. No histogram, no key matching.
+      _refreshMonthly: function() {
+        var rows = (this._months || []).map(function(m) {
+          var migrated = m.migrated || 0;
+          var all = m.all || 0;
+          if (migrated > all) all = migrated; // safety: never negative
+          return {
+            key:          m.key,
+            label:        m.label,
+            migrated:     migrated,
+            nonMigrated:  all - migrated,
+            all:          all
+          };
+        });
+        this.monthlyMigrated = rows;
+      },
+
+      /* ==========================================================
+         TAB LOGIC
+         ========================================================== */
+
+      // True when the given view is active (used by dom-if)
+      _isView: function(active, view) {
+        return active === view;
+      },
+
+      // Returns the css class for a tab, adding "active" when selected
+      _tabClass: function(active, view) {
+        return active === view ? 'view-tab active' : 'view-tab';
+      },
+
+      _selectOverall: function() { this.activeView = 'overall'; },
+      _selectDocType: function() { this.activeView = 'docType'; },
+      _selectFormat:  function() { this.activeView = 'format'; },
+      _selectSize:    function() { this.activeView = 'size'; },
+
+      /* ==========================================================
+         GENERIC CHART HELPERS
+         ES returns buckets like: [{ key: "...", value: N }, ...]
+         ========================================================== */
+
+      // True when an aggregation came back empty
+      _isEmpty: function(data) {
+        return !data || !data.length;
+      },
+
+      // Labels straight from bucket keys
+      _labels: function(data) {
+        if (!data || !data.length) return [];
+        return data.map(function(entry) { return entry.key; });
+      },
+
+      // Values nested as chart-elements expects: [[v1, v2, ...]]
+      _values: function(data) {
+        if (!data || !data.length) return [[]];
+        return [data.map(function(entry) { return entry.value; })];
+      },
+
+      // X-axis labels formatted as "Mon-YY" (e.g. 2026-03-01 -> Mar-26)
+      _monthLabels: function(data) {
+        if (!data || !data.length) return [];
+        var self = this;
+        return data.map(function(entry) { return self._toMonthYear(entry.key); });
+      },
+
+      // Normalise any month-bucket key to "Mon-YY" (e.g. "Mar-26").
+      // Handles three formats the histogram may emit:
+      //   - "2026-03-01" or "2026-03"  (dash-separated date)
+      //   - "2026-03-01T00:00:00.000Z" (full ISO datetime)
+      //   - 1740787200000              (epoch milliseconds, number or string)
+      _toMonthYear: function(key) {
+        if (key === null || typeof key === 'undefined' || key === '') return '';
+        var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+        // Pure number (or numeric string) that is not a dash-date => epoch ms.
+        var str = String(key);
+        if (/^\d{10,}$/.test(str)) {
+          var dms = new Date(parseInt(str, 10));
+          if (!isNaN(dms.getTime())) {
+            return months[dms.getMonth()] + '-' + String(dms.getFullYear()).slice(-2);
+          }
+        }
+
+        // Dash-separated date or ISO datetime: take the date part before 'T'.
+        var datePart = str.split('T')[0];
+        var parts = datePart.split('-');
+        if (parts.length >= 2) {
+          var year = parts[0];
+          var monthIdx = parseInt(parts[1], 10) - 1;
+          if (monthIdx >= 0 && monthIdx <= 11 && year.length === 4) {
+            return months[monthIdx] + '-' + year.slice(-2);
+          }
+        }
+
+        // Last resort: let Date try to parse it.
+        var d = new Date(str);
+        if (!isNaN(d.getTime())) {
+          return months[d.getMonth()] + '-' + String(d.getFullYear()).slice(-2);
+        }
+        return str;
+      },
+
+      /* ==========================================================
+         OVERALL VIEW  (storage bars + documents line, one chart)
+
+         Two datasets share the month axis:
+           - dataset 0 : storage, bars on the left axis
+           - dataset 1 : documents, line on the right axis
+         Documents are aligned to the storage month keys so both line up.
+         ========================================================== */
+
+      // Documents aligned to the storage month keys
+      _docsAlignedToStorage: function(storage, docs) {
+        var docMap = {};
+        (docs || []).forEach(function(entry) { docMap[entry.key] = entry.value; });
+        return (storage || []).map(function(entry) {
+          return docMap[entry.key] || 0;
+        });
+      },
+
+      // Reconcile per-month document counts (from the dc:created histogram,
+      // which does not exclude versions/trashed) to the authoritative period
+      // total from the page provider (which does). We keep each month's shape
+      // but scale so the series sums to totalCount, then push any rounding
+      // drift onto the busiest month so the displayed bars add up exactly to
+      // the KPI total. This keeps the whole dashboard telling one number.
+      _reconcileDocs: function(rawMonthly, authoritativeTotal) {
+        var aggTotal = rawMonthly.reduce(function(s, v) { return s + v; }, 0);
+        if (!authoritativeTotal || aggTotal === 0 || aggTotal === authoritativeTotal) {
+          return rawMonthly;
+        }
+        var factor = authoritativeTotal / aggTotal;
+        var scaled = rawMonthly.map(function(v) { return Math.round(v * factor); });
+
+        var scaledTotal = scaled.reduce(function(s, v) { return s + v; }, 0);
+        var drift = authoritativeTotal - scaledTotal;
+        if (drift !== 0 && scaled.length) {
+          var maxIdx = 0;
+          for (var i = 1; i < scaled.length; i++) {
+            if (scaled[i] > scaled[maxIdx]) maxIdx = i;
+          }
+          scaled[maxIdx] += drift;
+          if (scaled[maxIdx] < 0) scaled[maxIdx] = 0;
+        }
+        return scaled;
+      },
+
+      // [[storageInUnit...], [docs...]] — both series are grouped bars.
+      // Storage is exact per month; documents are reconciled so the bars sum
+      // to the KPI's period total (totalCount).
+      _overallValues: function(storage, docs, total) {
+        if (!storage || !storage.length) return [[]];
+        // Storage is auto-scaled to the best unit (KB/MB/GB/TB) via
+        // _storageUnit, computed live from the actual bytes each render.
+        // Nothing is hardcoded — the unit follows the data.
+        var unit = this._storageUnit(storage);
+        var storageVals = storage.map(function(entry) {
+          var v = (entry.value || 0) / unit.divisor;
+          return Math.round(v * 100) / 100;
+        });
+        var rawDocs = this._docsAlignedToStorage(storage, docs);
+        var docVals = this._reconcileDocs(rawDocs, total);
+        return [storageVals, docVals];
+      },
+
+      // Legend labels: Overall chart fixes storage to MB (see _overallValues).
+      _overallSeries: function(storage) {
+        return ['Storage added in (' + this._storageUnit(storage).name + ')',
+                'Number of documents created'];
+      },
+
+      // ================= SLOT 6: JULY 2026 BASELINE =================
+      // Same dual-bar shape as the Overall chart (storage in MB + document
+      // counts on one shared axis), but the data feed is anchored to Jul 2026,
+      // so the first bar is always the July baseline and the chart runs
+      // month by month to the selected end date.
+      _baselineValues: function(storage, docs) {
+        if (!storage || !storage.length) return [[]];
+        // Storage auto-scaled to the best unit (KB/MB/GB/TB) via _storageUnit,
+        // computed live from the actual bytes. Nothing hardcoded.
+        var unit = this._storageUnit(storage);
+        var storageVals = storage.map(function(entry) {
+          var v = (entry.value || 0) / unit.divisor;
+          return Math.round(v * 100) / 100;
+        });
+        // align the document counts to the same month buckets as storage
+        var docMap = {};
+        (docs || []).forEach(function(d) { docMap[d.key] = d.value || 0; });
+        var docVals = storage.map(function(entry) { return docMap[entry.key] || 0; });
+        return [storageVals, docVals];
+      },
+
+      _baselineSeries: function(storage) {
+        return ['Storage added in (' + this._storageUnit(storage).name + ')',
+                'Number of documents created'];
+      },
+
+      // Build the month-by-month table with % change against July 2026.
+      // The FIRST bucket is the baseline (Jul) and shows "baseline" rather
+      // than a percentage.
+      _computeBaselineGrowth: function(storage, docs) {
+        if (!storage || !storage.length) return [];
+        var self = this;
+        var docMap = {};
+        (docs || []).forEach(function(d) { docMap[d.key] = d.value || 0; });
+
+        var baseDocs = docMap[storage[0].key] || 0;
+        var baseStorage = storage[0].value || 0;
+
+        // Percentage change vs the baseline month.
+        //
+        // ZERO-BASELINE CASE: if the chosen baseline month is empty, percentage
+        // change is mathematically undefined (division by zero) — there is no
+        // percentage that describes growth from nothing. Rather than print a
+        // useless "n/a", we show the ABSOLUTE increase (e.g. "+116 new",
+        // "+452.9 KB new"), which states the real growth honestly. `fmt` is the
+        // matching formatter so documents and storage each read correctly.
+        function pct(current, base, fmt) {
+          if (!base) {
+            return current > 0 ? '+' + fmt(current) + ' new' : '0%';
+          }
+          var change = ((current - base) / base) * 100;
+          var rounded = Math.round(change * 10) / 10;
+          return (rounded > 0 ? '+' : '') + rounded + '%';
+        }
+        var fmtDocs    = function(v) { return self._withCommas(v); };
+        var fmtStorage = function(v) { return self._formatStorage(v); };
+
+        return storage.map(function(entry, i) {
+          var d = docMap[entry.key] || 0;
+          var st = entry.value || 0;
+          return {
+            month: self._toMonthYear(entry.key),
+            docs: self._withCommas(d),
+            storage: self._formatStorage(st),
+            docsPct: i === 0 ? 'baseline' : pct(d, baseDocs, fmtDocs),
+            storagePct: i === 0 ? 'baseline' : pct(st, baseStorage, fmtStorage)
+          };
+        });
+      },
+
+      _hasBaseline: function(rows) {
+        return !!(rows && rows.length);
+      },
+
+      // colour the delta cell: green for growth, red for decline, grey otherwise
+      _deltaClass: function(pctText) {
+        if (!pctText || pctText === 'baseline' || pctText === 'n/a') return 'delta-cell delta-flat';
+        if (pctText.charAt(0) === '+') return 'delta-cell delta-up';
+        if (pctText.charAt(0) === '-') return 'delta-cell delta-down';
+        return 'delta-cell delta-flat';
+      },
+
+
+      // Both datasets (storage + documents) render as grouped bars on ONE
+      // shared Y-axis. We do NOT use a second axis: chart-elements builds its
+      // datasets internally, so a per-dataset line type / second axis can't be
+      // injected reliably, and an unused second axis falls back to a 0-1 scale.
+      // One axis keeps both bars readable and avoids that phantom scale.
+      _overallOptions: function(storage) {
+        return {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: false,
+          legend: {
+            display: true,
+            position: 'top',
+            labels: { boxWidth: 10, fontSize: 11, padding: 12 }
+          },
+          scales: {
+            xAxes: [{
+              gridLines: { display: false, drawBorder: false },
+              ticks: { autoSkip: false, maxRotation: 30, fontSize: 11, fontColor: '#9e9e9e' }
+            }],
+            yAxes: [{
+              gridLines: { color: 'rgba(0,0,0,0.04)', drawBorder: false },
+              ticks: { beginAtZero: true, fontSize: 11, fontColor: '#9e9e9e' }
+            }]
+          },
+          tooltips: { mode: 'index', intersect: false }
+        };
+      },
+
+      /* ==========================================================
+         STORAGE HELPERS  (bytes -> KB/MB/GB/TB, auto-scaled)
+         ========================================================== */
+
+      // Largest monthly value, used to choose a display unit
+      // Sum of all bucket values (bytes) — replaces the dedicated
+      // total-storage aggregation.
+      _sumBuckets: function(data) {
+        if (!data || !data.length) return 0;
+        return data.reduce(function(s, e) { return s + (e.value || 0); }, 0);
+      },
+
+      _storageMax: function(data) {
+        if (!data || !data.length) return 0;
+        return data.reduce(function(max, entry) {
+          var v = entry.value || 0;
+          return v > max ? v : max;
+        }, 0);
+      },
+
+      // Pick a unit so small test data is not rounded down to zero
+      _storageUnit: function(data) {
+        var max = this._storageMax(data);
+        if (max >= 1099511627776) return { name: 'TB', divisor: 1099511627776 };
+        if (max >= 1073741824)    return { name: 'GB', divisor: 1073741824 };
+        if (max >= 1048576)       return { name: 'MB', divisor: 1048576 };
+        return { name: 'KB', divisor: 1024 };
+      },
+
+      // Per-month storage converted into the chosen unit
+      _storageValues: function(data) {
+        if (!data || !data.length) return [[]];
+        var unit = this._storageUnit(data);
+        return [data.map(function(entry) {
+          var v = (entry.value || 0) / unit.divisor;
+          return Math.round(v * 100) / 100;
+        })];
+      },
+
+      // Legend label reflecting the chosen unit, e.g. "Storage (MB)"
+      _storageSeries: function(data) {
+        return ['Storage (' + this._storageUnit(data).name + ')'];
+      },
+
+      /* ==========================================================
+         FORMAT / MIME HELPERS  (By Format pie)
+         ========================================================== */
+
+      // Friendly labels for the By Format pie
+      _typeLabels: function(data) {
+        if (!data || !data.length) return [];
+        var self = this;
+        return data.map(function(entry) { return self._friendlyType(entry.key); });
+      },
+
+      // Map a mime-type to a short readable name
+      _friendlyType: function(mime) {
+        if (!mime) return 'Unknown';
+        var map = {
+          'application/pdf': 'PDF',
+          'image/png': 'PNG Image',
+          'image/jpeg': 'JPEG Image',
+          'image/gif': 'GIF Image',
+          'text/plain': 'Text',
+          'video/mp4': 'MP4 Video',
+          'application/msword': 'Word',
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'Word',
+          'application/vnd.ms-excel': 'Excel',
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'Excel',
+          'application/zip': 'ZIP Archive'
+        };
+        if (map[mime]) return map[mime];
+        var parts = mime.split('/');
+        return parts.length > 1 ? parts[1].toUpperCase() : mime;
+      },
+
+      /* ==========================================================
+         MIGRATION HELPERS
+
+         totalCount and migratedCount come from page-provider resultsCount
+         (filtered counts, scale-safe). Non-migrated is the difference.
+         ========================================================== */
+
+      _migrationLabels: function() {
+        return ['Migrated', 'Non-Migrated'];
+      },
+
+      // Non-migrated = total - migrated, never negative
+      _nonMigrated: function(total, migrated) {
+        var diff = (total || 0) - (migrated || 0);
+        return diff > 0 ? diff : 0;
+      },
+      // Add thousands separators dynamically for any size (e.g. 15416 -> 15,416,
+      // 12345678 -> 12,345,678). International grouping (groups of 3).
+      _withCommas: function(n) {
+        n = n || 0;
+        return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+      },
+      // Non-migrated (computed) with commas — single helper, no nested binding.
+      _nonMigratedCommas: function(total, migrated) {
+        var diff = (total || 0) - (migrated || 0);
+        if (diff < 0) diff = 0;
+        return String(diff).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+      },
+      _formatNonMigrated: function(total, migrated) {
+        var n = (total || 0) - (migrated || 0);
+        if (n < 0) n = 0;
+        if (n >= 1000000000) return (Math.round(n / 100000000) / 10) + 'B';
+        if (n >= 1000000)    return (Math.round(n / 100000) / 10) + 'M';
+        if (n >= 1000)       return (Math.round(n / 100) / 10) + 'K';
+        return String(n);
+      },
+
+      // Donut values: [[migrated, nonMigrated]]
+      _migrationValues: function(total, migrated) {
+        return [[migrated || 0, this._nonMigrated(total, migrated)]];
+      },
+
+      // Migrated share of total, whole number
+      _migratedPct: function(total, migrated) {
+        var t = total || 0;
+        if (t <= 0) return 0;
+        return Math.round(((migrated || 0) / t) * 100);
+      },
+
+      /* ==========================================================
+         MONTHLY MIGRATED vs NON-MIGRATED  (new chart)
+
+         Reads monthlyMigrated: [{label, migrated, nonMigrated, all}, ...].
+         Same two-series grouped-bar shape as the Overall chart, but the
+         series are Migrated and Non-Migrated per month.
+         ========================================================== */
+
+      // True when there are no month rows yet
+      _monthlyEmpty: function(rows) {
+        return !rows || !rows.length;
+      },
+
+      // X-axis labels: one per month, e.g. "Mar-26"
+      _monthlyLabels: function(rows) {
+        if (!rows || !rows.length) return [];
+        return rows.map(function(r) { return r.label; });
+      },
+
+      // Two series: [[migrated per month...], [nonMigrated per month...]]
+      _monthlyValues: function(rows) {
+        if (!rows || !rows.length) return [[]];
+        var migrated    = rows.map(function(r) { return r.migrated || 0; });
+        var nonMigrated = rows.map(function(r) { return r.nonMigrated || 0; });
+        return [migrated, nonMigrated];
+      },
+
+      // Legend labels
+      _monthlySeries: function() {
+        return ['Migrated', 'Non-Migrated'];
+      },
+
+      // Green (migrated) + red (non-migrated) to match the donut
+      _monthlyColors: function() {
+        return ['#2e7d32', '#d32f2f'];
+      },
+
+      /* ==========================================================
+         TOP 5 USE CASES (Slots 4 & 5)
+
+         Use case = ecm:primaryType. Slot 4 ranks by document count
+         (byDocType), Slot 5 by storage added (storageByDocType). For each
+         row we also show a migration status: "Migrated" only when every
+         document of that type in the period is migrated, else "Not Yet".
+         The status counts come from bounded per-type page providers.
+         ========================================================== */
+
+      // Build the top-5 by document count. Also caches the total doc count per
+      // type (used for the migrated %), then refreshes the type list.
+      _computeTopByDocs: function(data) {
+        var map = {};
+        (data || []).forEach(function(entry) {
+          if (entry && entry.key) map[entry.key] = entry.value || 0;
+        });
+        this._docCountByType = map;
+        var top = this._topN(data, 5);
+        this.topByDocs = top;
+        this.topByDocsMax = top.length ? top[0].value : 0;
+        this._rebuildUseCaseTypes();
+        // Nudge the pct helpers now that totals are known.
+        this._statusVersion++;
+      },
+
+      // Build the top-5 by storage, then refresh the type list.
+      _computeTopByStorage: function(data) {
+        var top = this._topN(data, 5);
+        this.topByStorage = top;
+        this.topByStorageMax = top.length ? top[0].value : 0;
+        this._rebuildUseCaseTypes();
+      },
+
+      // Generic: sort buckets by value desc, take N, shape to {type,label,value}.
+      _topN: function(data, n) {
+        if (!data || !data.length) return [];
+        var self = this;
+        var copy = data.slice().sort(function(a, b) {
+          return (b.value || 0) - (a.value || 0);
+        });
+        return copy.slice(0, n).map(function(entry) {
+          return {
+            type:  entry.key,
+            label: self._friendlyDocType(entry.key),
+            value: entry.value || 0
+          };
+        });
+      },
+
+      // Friendly display name for a primary type (fallbacks to the raw type).
+      _friendlyDocType: function(type) {
+        if (!type) return 'Unknown';
+        var map = {
+          'File': 'File',
+          'Note': 'Note',
+          'Picture': 'Picture',
+          'Video': 'Video',
+          'Audio': 'Audio',
+          'BrokerageServiceDoc': 'Brokerage Service Doc'
+        };
+        if (map[type]) return map[type];
+        // Insert spaces before capitals for camelCase type names.
+        return String(type).replace(/([a-z])([A-Z])/g, '$1 $2');
+      },
+
+      // Distinct primary types across both top-5 lists, as {type, mig} objects
+      // (each provider writes its migrated count into its own mig field).
+      // Rebuilt only when the set of types actually changes, to avoid thrashing
+      // the providers.
+      _rebuildUseCaseTypes: function() {
+        var seen = {};
+        var types = [];
+        (this.topByDocs || []).concat(this.topByStorage || []).forEach(function(r) {
+          if (r && r.type && !seen[r.type]) { seen[r.type] = true; types.push(r.type); }
+        });
+        var current = (this._useCaseTypes || []).map(function(o) { return o.type; });
+        if (current.join('|') === types.join('|')) return; // unchanged
+        this._useCaseTypes = types.map(function(t) { return { type: t, mig: 0 }; });
+      },
+
+      // NXQL: migrated docs of a given primary type in the period.
+      _typeMigratedQuery: function(t, startDate, endDate) {
+        var range = this._dateRangeClause(startDate, endDate);
+        if (!range || !t) return '';
+        return "SELECT * FROM Document WHERE ecm:isVersion = 0 " +
+               "AND ecm:isTrashed = 0 " + range +
+               " AND ecm:primaryType = '" + t + "'" +
+               " AND fid_migration:migrationHistory/*/systemName IS NOT NULL";
+      },
+
+      // A per-type migrated count arrived. Store it (default 0) and bump the
+      // version so the pct helpers recompute.
+      _onTypeMigratedCount: function(e) {
+        if (!e || !e.model || !e.model.uc || !e.detail) return;
+        var val = e.detail.value;
+        if (typeof val !== 'number') return;
+        var type = e.model.uc.type;
+        var map = {};
+        var src = this._typeMigrated || {};
+        for (var k in src) { if (src.hasOwnProperty(k)) map[k] = src[k]; }
+        map[type] = val;
+        this._typeMigrated = map;
+        this._statusVersion++;
+      },
+
+      // Row number (index is 0-based).
+      _inc: function(index) {
+        return index + 1;
+      },
+
+      // Progress-bar inline width as a percentage of the list maximum.
+      _barStyle: function(value, max) {
+        var pct = (max && max > 0) ? Math.round((value / max) * 100) : 0;
+        if (pct < 4 && value > 0) pct = 4; // keep a sliver visible
+        return 'width:' + pct + '%';
+      },
+
+      // Migrated percentage for a type. Total comes from the byDocType
+      // aggregation (docCount map); migrated defaults to 0 if not yet counted.
+      // Always returns a real number so every row shows a percentage.
+      _statusPct: function(type, docCount, _v) {
+        var total = (docCount || {})[type] || 0;
+        if (total <= 0) return '0%';
+        var migrated = (this._typeMigrated || {})[type] || 0;
+        var pct = Math.round((migrated / total) * 100);
+        return pct + '%';
+      },
+
+      /* ==========================================================
+         KPI FORMATTING
+         ========================================================== */
+
+      // 204000 -> "204K", 1500000 -> "1.5M", 2300000000 -> "2.3B"
+      _formatCount: function(n) {
+        n = n || 0;
+        if (n >= 1000000000) return (Math.round(n / 100000000) / 10) + 'B';
+        if (n >= 1000000)    return (Math.round(n / 100000) / 10) + 'M';
+        if (n >= 1000)       return (Math.round(n / 100) / 10) + 'K';
+        return String(n);
+      },
+
+      // bytes -> "1.4 TB" / "512 MB" etc. for the KPI cell
+      _formatStorage: function(bytes) {
+        bytes = bytes || 0;
+        if (bytes >= 1125899906842624) return (Math.round(bytes / 1125899906842624 * 10) / 10) + ' PB';
+        if (bytes >= 1099511627776)    return (Math.round(bytes / 1099511627776 * 10) / 10) + ' TB';
+        if (bytes >= 1073741824)       return (Math.round(bytes / 1073741824 * 10) / 10) + ' GB';
+        if (bytes >= 1048576)          return (Math.round(bytes / 1048576 * 10) / 10) + ' MB';
+        if (bytes >= 1024)             return (Math.round(bytes / 1024 * 10) / 10) + ' KB';
+        return bytes + ' B';
+      }
+
+    });
+  </script>
+
+</dom-module>
